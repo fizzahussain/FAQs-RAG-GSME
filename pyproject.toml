@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gsme-parser"
-version = "0.3.0"
-description = "FastAPI demo for structure-first FAQ and schedule parsing"
+name = "gsme-rag"
+version = "0.5.0"
+description = "Foundation for the GSME RAG pipeline with separate parsing and chunking stages"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,9 +16,12 @@ dependencies = [
     "uvicorn[standard]>=0.30.6",
 ]
 
+[project.optional-dependencies]
+test = ["httpx2>=0.1.0"]
+
 [project.scripts]
-gsme-parser = "gsme_parser.cli:main"
-gsme-api = "gsme_parser.api.run:main"
+gsme-rag = "gsme_rag.cli:main"
+gsme-rag-api = "gsme_rag.api.run:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,4 +1,3 @@
-import hashlib
 import re
 import unicodedata
 
@@ -30,17 +29,4 @@ def split_question_number(text: str) -> tuple[str | None, str]:
     number, question = match.groups()
     return number.zfill(2), normalize_inline(question)
 
-
-def slugify(text: str) -> str:
-    normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "-", normalized.lower()).strip("-")
-    return normalized or "uncategorized"
-
-
-def make_faq_id(category: str, number: str | None, question: str) -> str:
-    category_slug = slugify(category)
-    if number:
-        return f"{category_slug}-{number}"
-    digest = hashlib.sha1(question.encode("utf-8")).hexdigest()[:8]
-    return f"{category_slug}-{digest}"
 

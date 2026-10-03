@@ -1,3 +1,0 @@
-[console_scripts]
-gsme-api = gsme_parser.api.run:main
-gsme-parser = gsme_parser.cli:main
