@@ -1,0 +1,10 @@
+[
+  {
+    "question": "What are the deadlines and ship date for the 28 nm HPC+ RF shared schedule?",
+    "evidence": "| 28 | HPC+ RF | 2026-08-26 | 2026-09-02 | 2026-09-09 | 2026-12-17 |"
+  },
+  {
+    "question": "What is the tapeout date for 65 nm MS RF GP?",
+    "evidence": "| 65 | MS RF GP | 2026-10-07 | 2026-10-14 | 2026-10-21 | 2027-01-17 |"
+  }
+]

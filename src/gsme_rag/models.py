@@ -27,6 +27,10 @@ class MarkdownChunk:
     heading_path: list[str]
     source_page_start: int | None = None
     source_page_end: int | None = None
+    table_row_number: int | None = None
+    unit_id: str = ""
+    part_index: int = 0
+    part_count: int = 1
 
     @property
     def character_count(self) -> int:

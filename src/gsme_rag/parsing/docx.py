@@ -22,20 +22,22 @@ def _iter_blocks(document: DocumentObject) -> Iterator[Paragraph | Table]:
 
 
 def _format_runs(paragraph: Paragraph) -> str:
-    fragments: list[str] = []
+    groups: list[tuple[str, bool, bool]] = []
     for run in paragraph.runs:
         text = run.text.replace("\r", "").replace("\n", " ")
         if not text:
             continue
-        if run.bold is True and run.italic is True:
-            fragments.append(f"***{text}***")
-        elif run.bold is True:
-            fragments.append(f"**{text}**")
-        elif run.italic is True:
-            fragments.append(f"*{text}*")
+        bold, italic = run.bold is True, run.italic is True
+        if groups and groups[-1][1:] == (bold, italic):
+            previous, _, _ = groups[-1]
+            groups[-1] = (previous + text, bold, italic)
         else:
-            fragments.append(text)
+            groups.append((text, bold, italic))
 
+    fragments = []
+    for text, bold, italic in groups:
+        marker = "***" if bold and italic else "**" if bold else "*" if italic else ""
+        fragments.append(f"{marker}{text}{marker}" if marker else text)
     rendered = "".join(fragments)
     return re.sub(r"[ \t]+", " ", rendered).strip()
 
@@ -94,7 +96,37 @@ def parse_docx_to_markdown(
                 )
             )
             continue
-        parts.append(f"<!-- table: {table_number} -->\n{render_markdown_table(rows)}")
+        if any(cell.tables for row in block.rows for cell in row.cells):
+            warnings.append(
+                ParseWarning(
+                    code="nested_table_review",
+                    message="Nested tables need manual review; cell paragraph text was kept",
+                    location=f"table {table_number}",
+                )
+            )
+        first_data_row = 2
+        if len(rows[0]) == 2 and rows[0][0].rstrip().endswith("?") and rows[0][1]:
+            rows.insert(0, ["Question", "Answer"])
+            first_data_row = 1
+            warnings.append(
+                ParseWarning(
+                    code="table_header_inferred",
+                    message="A two-column question/answer table had no visible header",
+                    location=f"table {table_number}",
+                )
+            )
+        parts.append(
+            f"<!-- table: {table_number}; first_data_row: {first_data_row} -->\n"
+            + render_markdown_table(rows)
+        )
+
+    if document.inline_shapes:
+        warnings.append(
+            ParseWarning(
+                code="embedded_images_ignored",
+                message="Inline images were not converted to text",
+            )
+        )
 
     markdown = finish_markdown(parts)
     if not markdown:

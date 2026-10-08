@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gsme-rag"
-version = "0.5.0"
-description = "Foundation for the GSME RAG pipeline with separate parsing and chunking stages"
+version = "0.7.0"
+description = "Inspectable parsing and chunking lab for the GSME RAG pipeline"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,9 +15,6 @@ dependencies = [
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30.6",
 ]
-
-[project.optional-dependencies]
-test = ["httpx2>=0.1.0"]
 
 [project.scripts]
 gsme-rag = "gsme_rag.cli:main"

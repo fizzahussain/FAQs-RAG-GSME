@@ -225,6 +225,15 @@ def parse_pdf_to_markdown(
     if _detect_table_layout(lines, page_width):
         table, table_warnings = _table_markdown(lines, page_width)
         warnings.extend(table_warnings)
+        warnings.append(
+            ParseWarning(
+                code="pdf_table_inferred",
+                message=(
+                    "Question and answer columns were inferred from PDF positions; "
+                    "check the Markdown rows against the original pages"
+                ),
+            )
+        )
         markdown = finish_markdown(
             [f"# {title or 'PDF Document'}", "<!-- pdf-table-layout -->\n" + table]
         )

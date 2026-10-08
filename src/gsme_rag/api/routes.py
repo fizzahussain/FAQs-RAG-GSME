@@ -5,17 +5,20 @@ from dataclasses import asdict
 from pathlib import Path
 import tempfile
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 
 from gsme_rag.api.schemas import (
     ChunkRequest,
     ChunkResponse,
+    CompareRequest,
     MarkdownChunkOut,
     ParseResponse,
     ParseWarningOut,
+    SchedulePreviewResponse,
 )
-from gsme_rag.chunking import chunk_markdown
+from gsme_rag.chunking import chunk_markdown, compare_strategies
 from gsme_rag.parsing import parse_to_markdown
+from gsme_rag.parsing.schedules import filter_schedule_records, parse_schedule_records
 
 
 router = APIRouter(prefix="/v1")
@@ -59,15 +62,17 @@ async def architecture() -> dict:
             "name": "parser",
             "input": ["DOCX", "born-digital PDF", "CSV"],
             "output": "normalized Markdown",
+            "schedule_csv_output": "optional typed records for exact filtering",
             "makes_chunk_decisions": False,
         },
         "stage_2": {
             "name": "chunker",
             "input": "normalized Markdown",
-            "output": "layout-aware chunks with source metadata",
+            "output": "chunks with source metadata",
+            "strategies": ["fixed_size", "layout_aware", "hybrid", "paragraph_aware"],
             "reads_original_file": False,
         },
-        "out_of_scope": ["OCR", "database storage", "search", "embeddings"],
+        "out_of_scope": ["OCR", "database storage", "semantic search", "embeddings"],
     }
 
 
@@ -103,9 +108,41 @@ async def parse_preview(file: UploadFile = File(...)) -> ParseResponse:
 
 
 @router.post(
+    "/schedules/preview",
+    response_model=SchedulePreviewResponse,
+    summary="Preview and filter typed records from a schedule CSV",
+)
+async def schedule_preview(
+    file: UploadFile = File(...),
+    technology_nm: int | None = Query(default=None, ge=0),
+    flavor: str | None = None,
+    tapeout_on_or_after: str | None = None,
+) -> SchedulePreviewResponse:
+    path, original_name, suffix = await _save_upload(file)
+    try:
+        if suffix != ".csv":
+            raise HTTPException(status_code=415, detail="A schedule CSV is required")
+        try:
+            records = await asyncio.to_thread(parse_schedule_records, path)
+            matched = filter_schedule_records(
+                records, technology_nm, flavor, tapeout_on_or_after
+            )
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return SchedulePreviewResponse(
+            source_file=original_name,
+            total_records=len(records),
+            matched_records=len(matched),
+            records=matched,
+        )
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@router.post(
     "/chunk",
     response_model=ChunkResponse,
-    summary="Create layout-aware chunks from normalized Markdown",
+    summary="Create comparable chunks from normalized Markdown",
 )
 async def chunk_preview(request: ChunkRequest) -> ChunkResponse:
     source_file = Path(request.source_file).name or "normalized.md"
@@ -115,6 +152,8 @@ async def chunk_preview(request: ChunkRequest) -> ChunkResponse:
             request.markdown,
             source_file,
             request.max_chars,
+            request.strategy,
+            request.overlap_chars,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -130,8 +169,25 @@ async def chunk_preview(request: ChunkRequest) -> ChunkResponse:
     return ChunkResponse(
         source_file=source_file,
         max_chars=request.max_chars,
+        strategy=request.strategy,
+        overlap_chars=request.overlap_chars if request.strategy == "hybrid" else 0,
         chunk_count=len(chunks),
         warning_count=len(warnings),
         chunks=chunks,
         warnings=warnings,
     )
+
+
+@router.post("/compare", summary="Compare chunk strategies on the same Markdown")
+async def compare_preview(request: CompareRequest) -> dict:
+    try:
+        return await asyncio.to_thread(
+            compare_strategies,
+            request.markdown,
+            [case.model_dump() for case in request.cases],
+            Path(request.source_file).name or "normalized.md",
+            request.max_chars,
+            request.overlap_chars,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
