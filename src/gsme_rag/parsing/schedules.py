@@ -16,6 +16,28 @@ SCHEDULE_COLUMNS = (
     "estimated_ship_date",
 )
 DATE_COLUMNS = SCHEDULE_COLUMNS[2:]
+SCHEDULE_HEADER_ALIASES = {
+    "tech (nm)": "technology_nm",
+    "flavor": "flavor",
+    "trial": "trial_deadline",
+    "final": "final_deadline",
+    "tapeout": "tapeout_date",
+    "est. ship": "estimated_ship_date",
+}
+
+
+def normalize_schedule_header(value: str) -> str:
+    """Recognize only the two known exports, without guessing new columns."""
+    heading = " ".join(value.strip().casefold().split())
+    if heading in SCHEDULE_COLUMNS:
+        return heading
+    return SCHEDULE_HEADER_ALIASES.get(heading, heading)
+
+
+def is_schedule_header(values: list[str]) -> bool:
+    return set(SCHEDULE_COLUMNS).issubset(
+        {normalize_schedule_header(value) for value in values}
+    )
 
 
 def make_source_id(content_sha256: str, schedule_kind: str | None = None) -> str:
@@ -49,8 +71,11 @@ def _date(value: str, row_number: int, column: str) -> date:
 def parse_schedule_records(path: str | Path) -> list[dict]:
     """Validate the known schedule schema and retain each CSV source row."""
     with Path(path).open("r", encoding="utf-8-sig", newline="") as source:
-        reader = csv.DictReader(source)
-        headings = [name.strip() for name in reader.fieldnames or [] if name]
+        reader = csv.reader(source)
+        raw_headers = next(reader, [])
+        headings = [normalize_schedule_header(name) for name in raw_headers]
+        while headings and not headings[-1]:
+            headings.pop()
         if len(headings) != len(set(headings)):
             raise ValueError("Schedule CSV has duplicate column names")
         missing = [name for name in SCHEDULE_COLUMNS if name not in headings]
@@ -61,12 +86,14 @@ def parse_schedule_records(path: str | Path) -> list[dict]:
             raise ValueError(f"Schedule CSV has unsupported columns: {', '.join(extra)}")
 
         records = []
-        for row_number, raw in enumerate(reader, start=2):
-            if not any((value or "").strip() for value in raw.values() if isinstance(value, str)):
+        for raw in reader:
+            row_number = reader.line_num
+            if not any(value.strip() for value in raw):
                 continue
-            if None in raw:
+            if any(value.strip() for value in raw[len(headings):]):
                 raise ValueError(f"row {row_number}: more cells than column names")
-            row = {name: (raw.get(name) or "").strip() for name in SCHEDULE_COLUMNS}
+            row = dict(zip(headings, [value.strip() for value in raw[:len(headings)]]))
+            row = {name: row.get(name, "") for name in SCHEDULE_COLUMNS}
             if not row["technology_nm"].isdigit():
                 raise ValueError(f"row {row_number}: technology_nm must be a whole number")
             if not row["flavor"]:

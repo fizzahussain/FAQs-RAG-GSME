@@ -18,7 +18,7 @@ from gsme_rag.api.schemas import (
     SchedulePreviewResponse,
 )
 from gsme_rag.chunking import chunk_markdown, compare_strategies
-from gsme_rag.models import DocumentMetadata
+from gsme_rag.models import DocumentMetadata, chunk_to_record
 from gsme_rag.parsing import parse_to_markdown
 from gsme_rag.parsing.schedules import (
     filter_schedule_records,
@@ -87,6 +87,7 @@ async def architecture() -> dict:
 @router.post(
     "/parse",
     response_model=ParseResponse,
+    response_model_exclude_none=True,
     summary="Normalize one supported file to Markdown",
 )
 async def parse_preview(
@@ -122,6 +123,7 @@ async def parse_preview(
 @router.post(
     "/schedules/preview",
     response_model=SchedulePreviewResponse,
+    response_model_exclude_none=True,
     summary="Preview and filter typed records from a schedule CSV",
 )
 async def schedule_preview(
@@ -155,7 +157,6 @@ async def schedule_preview(
             matched_records=len(matched),
             records=[{
                 "schedule_kind": kind,
-                "schedule_kind_source": kind_source,
                 "source_id": source_id,
                 "record_id": f"{source_id}:row-{record['source_row_number']}",
                 "source_file": original_name,
@@ -163,6 +164,7 @@ async def schedule_preview(
             } for record in matched],
             warnings=[],
             source_id=source_id,
+            schedule_kind_source=kind_source,
         )
     finally:
         path.unlink(missing_ok=True)
@@ -171,6 +173,7 @@ async def schedule_preview(
 @router.post(
     "/chunk",
     response_model=ChunkResponse,
+    response_model_exclude_none=True,
     summary="Create comparable chunks from normalized Markdown",
 )
 async def chunk_preview(request: ChunkRequest) -> ChunkResponse:
@@ -191,10 +194,7 @@ async def chunk_preview(request: ChunkRequest) -> ChunkResponse:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
     chunks = [
-        MarkdownChunkOut(
-            **asdict(chunk),
-            character_count=chunk.character_count,
-        )
+        MarkdownChunkOut(**chunk_to_record(chunk))
         for chunk in result.chunks
     ]
     warnings = [ParseWarningOut.model_validate(asdict(item)) for item in result.warnings]

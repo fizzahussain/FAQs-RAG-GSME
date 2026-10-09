@@ -3,7 +3,7 @@ import hashlib
 import re
 
 from gsme_rag.models import ChunkResult, DocumentMetadata, MarkdownChunk, ParseWarning
-from gsme_rag.parsing.schedules import SCHEDULE_COLUMNS, resolve_schedule_kind
+from gsme_rag.parsing.schedules import is_schedule_header, resolve_schedule_kind
 
 
 PAGE_MARKER = re.compile(r"^<!--\s*page:\s*(\d+)\s*-->$")
@@ -303,9 +303,18 @@ def _table_units(block: _Block, heading_path: list[str]) -> list[_Unit]:
         (index for index, value in enumerate(header_cells) if value.strip().casefold() == "category"),
         None,
     )
+    question_column = next(
+        (index for index, value in enumerate(header_cells) if value.strip().casefold() == "question"),
+        None,
+    )
+    answer_column = next(
+        (index for index, value in enumerate(header_cells) if value.strip().casefold() == "answer"),
+        None,
+    )
     units = []
     for row_number, row in enumerate(lines[2:], start=block.first_data_row):
         cells = re.split(r"(?<!\\)\|", row.strip().strip("|"))
+        cells = [re.sub(r"<br\s*/?>", "\n", cell.strip(), flags=re.I).replace("\\|", "|") for cell in cells]
         page = block.page_start
         page_end = block.page_end
         if page_column is not None and page_column < len(cells):
@@ -314,14 +323,23 @@ def _table_units(block: _Block, heading_path: list[str]) -> list[_Unit]:
             if page_range:
                 page = int(page_range.group(1))
                 page_end = int(page_range.group(2) or page_range.group(1))
+        category = cells[category_column] if category_column is not None and category_column < len(cells) else None
+        is_faq = (
+            question_column is not None and answer_column is not None
+            and question_column < len(cells) and answer_column < len(cells)
+            and bool(cells[question_column])
+        )
+        anchor = f"Question: {cells[question_column]}\n\nAnswer:" if is_faq else ""
+        body = cells[answer_column] if is_faq else f"{header}\n{row}"
         units.append(_Unit(
             kind="table_row",
-            body=f"{header}\n{row}",
-            heading_path=heading_path.copy(),
+            body=body,
+            heading_path=[category] if category else heading_path.copy(),
             page_start=page,
             page_end=page_end,
+            anchor=anchor,
             table_row_number=row_number,
-            category=cells[category_column].strip() if category_column is not None and category_column < len(cells) else None,
+            category=category,
         ))
     return units
 
@@ -391,7 +409,10 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False) -> li
             index = next_index
             continue
 
-        if generic and (split_paragraphs or block.page_start != generic[-1].page_end):
+        if generic and (
+            block.page_start != generic[-1].page_end
+            or (split_paragraphs and generic[-1].text.rstrip().endswith((".", "?", "!", "…")))
+        ):
             flush_generic()
         generic.append(block)
         index += 1
@@ -428,9 +449,7 @@ def chunk_markdown(
     blocks = _merge_wrapped_questions(_parse_blocks(markdown))
     schedule_tables = [
         block for block in blocks if block.kind == "table"
-        and set(SCHEDULE_COLUMNS).issubset(
-            {cell.strip() for cell in block.text.splitlines()[0].strip("|").split("|")}
-        )
+        and is_schedule_header(block.text.splitlines()[0].strip("|").split("|"))
     ]
     is_schedule = bool(schedule_tables) or bool(metadata and metadata.document_class == "schedule")
     kind = metadata.schedule_kind if metadata else None
@@ -467,14 +486,26 @@ def chunk_markdown(
             code="markdown_edited",
             message="Markdown changed after parsing; the chunk hash identifies this edited version.",
         ))
+        if is_schedule and semantic_schedule_rows:
+            warnings.append(ParseWarning(
+                code="source_row_mapping_invalid",
+                message="Edited schedule Markdown cannot be linked reliably to CSV source rows",
+            ))
 
     for unit_index, unit in enumerate(units):
+        if unit.kind in {"question_answer", "table_row"} and unit.anchor and not unit.body.strip():
+            warnings.append(ParseWarning(
+                code="faq_answer_missing",
+                message="A question has no answer in the normalized source; no evidence chunk was created",
+                location=f"table row {unit.table_row_number}" if unit.table_row_number else None,
+            ))
+            continue
         context = _heading_markdown(unit.heading_path)
         anchor = unit.anchor.strip()
         fixed_parts = [part for part in (context, anchor) if part]
         fixed = "\n\n".join(fixed_parts)
         body_limit = max(80, max_chars - len(fixed) - (2 if fixed else 0))
-        if unit.kind in {"table", "table_row"}:
+        if unit.kind in {"table", "table_row"} and not unit.anchor:
             # A row is one record; cutting it can detach values from column names.
             body_parts = [unit.body]
         elif unit.body:
@@ -510,19 +541,6 @@ def chunk_markdown(
             digest = hashlib.sha256(
                 f"{source_id}|{normalized_hash}|{strategy}|{index}|{text}".encode("utf-8")
             ).hexdigest()[:16]
-            if unit.kind == "question_answer":
-                reason = "bold or numbered question paired with following answer"
-            elif unit.kind == "table_row":
-                reason = "table row kept with column headers"
-            elif strategy == "auto":
-                reason = (
-                    "long prose split at sentence boundaries with overlap"
-                    if len(body_parts) > 1 else "prose paragraph within section"
-                )
-            elif strategy == "fixed_size":
-                reason = "size baseline"
-            else:
-                reason = f"{strategy} selection"
             chunks.append(
                 MarkdownChunk(
                     chunk_id=f"chunk-{digest}",
@@ -531,7 +549,10 @@ def chunk_markdown(
                     chunk_type=unit.kind,
                     source_file=source_file,
                     heading_path=unit.heading_path.copy(),
-                    category=unit.category or (unit.heading_path[-1] if unit.heading_path else None),
+                    category=unit.category or (
+                        unit.heading_path[-1]
+                        if unit.kind == "question_answer" and unit.heading_path else None
+                    ),
                     source_page_start=unit.page_start,
                     source_page_end=unit.page_end,
                     table_row_number=unit.table_row_number,
@@ -539,15 +560,15 @@ def chunk_markdown(
                     part_index=part_index,
                     part_count=len(body_parts),
                     source_id=source_id,
-                    normalized_sha256=normalized_hash,
-                    document_type=metadata.document_type if metadata else "markdown",
-                    document_class=metadata.document_class if metadata else ("schedule" if is_schedule else "document"),
                     schedule_kind=kind,
-                    schedule_kind_source=metadata.schedule_kind_source if metadata else ("filename" if kind else None),
-                    retrieval_channel="semantic",
-                    strategy_used=strategy,
-                    routing_reason=reason,
-                    source_row_number=unit.table_row_number if is_schedule else None,
+                    source_row_number=(
+                        metadata.csv_source_rows[unit.table_row_number - 2]
+                        if is_schedule and metadata and metadata.csv_source_rows
+                        and normalized_hash == metadata.normalized_sha256
+                        and unit.table_row_number is not None
+                        and 2 <= unit.table_row_number < len(metadata.csv_source_rows) + 2
+                        else None
+                    ),
                 )
             )
 

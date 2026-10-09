@@ -2,7 +2,7 @@ import csv
 from pathlib import Path
 
 from gsme_rag.parsing.markdown import finish_markdown, render_markdown_table
-from gsme_rag.parsing.schedules import SCHEDULE_COLUMNS, resolve_schedule_kind
+from gsme_rag.parsing.schedules import is_schedule_header, resolve_schedule_kind
 from gsme_rag.models import ParseWarning, ParsedDocument
 
 
@@ -16,9 +16,13 @@ def parse_csv_to_markdown(
     warnings: list[ParseWarning] = []
 
     with input_path.open("r", encoding="utf-8-sig", newline="") as source:
-        rows = [[value.strip() for value in row] for row in csv.reader(source)]
+        reader = csv.reader(source)
+        nonempty = [
+            (reader.line_num, [value.strip() for value in row])
+            for row in reader if any(value.strip() for value in row)
+        ]
 
-    rows = [row for row in rows if any(value for value in row)]
+    rows = [row for _, row in nonempty]
     if not rows:
         return ParsedDocument(
             filename=display_name,
@@ -31,8 +35,16 @@ def parse_csv_to_markdown(
         )
 
     expected_width = max(len(row) for row in rows)
+    while expected_width and all(
+        len(row) < expected_width or not row[expected_width - 1]
+        for row in rows
+    ):
+        for row in rows:
+            if len(row) == expected_width:
+                row.pop()
+        expected_width -= 1
     normalized_rows: list[list[str]] = []
-    for row_number, row in enumerate(rows, start=1):
+    for (row_number, _), row in zip(nonempty, rows):
         if len(row) != expected_width:
             warnings.append(
                 ParseWarning(
@@ -57,8 +69,11 @@ def parse_csv_to_markdown(
                 )
             )
 
-    kind = resolve_schedule_kind(display_name, schedule_kind)
-    if kind is None and set(SCHEDULE_COLUMNS).issubset(normalized_rows[0]):
+    recognized_schedule = is_schedule_header(normalized_rows[0])
+    if not recognized_schedule and schedule_kind in {"full", "shared"}:
+        raise ValueError("The selected schedule type requires the known schedule columns")
+    kind = resolve_schedule_kind(display_name, schedule_kind) if recognized_schedule else None
+    if kind is None and recognized_schedule:
         warnings.append(
             ParseWarning(
                 code="schedule_kind_unknown",
@@ -81,4 +96,5 @@ def parse_csv_to_markdown(
         strategy_used="csv_to_markdown_table",
         markdown=markdown,
         warnings=warnings,
+        csv_source_rows=[row_number for row_number, _ in nonempty[1:]],
     )

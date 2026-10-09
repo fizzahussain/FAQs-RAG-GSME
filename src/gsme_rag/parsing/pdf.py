@@ -185,9 +185,19 @@ def _layout_markdown(lines: list[_Line]) -> str:
     parts: list[str] = []
     active_page: int | None = None
     first_heading_written = False
+    pending_line: _Line | None = None
+    pending_text: list[str] = []
+
+    def flush_text() -> None:
+        nonlocal pending_line, pending_text
+        if pending_text:
+            parts.append(" ".join(pending_text))
+        pending_line = None
+        pending_text = []
 
     for line in lines:
         if line.page != active_page:
+            flush_text()
             active_page = line.page
             parts.append(f"<!-- page: {active_page} -->")
 
@@ -198,14 +208,22 @@ def _layout_markdown(lines: list[_Line]) -> str:
             and len(line.text) <= 100
         )
         if is_heading:
+            flush_text()
             level = 1 if not has_document_title or not first_heading_written else 2
             parts.append(f"{'#' * level} {line.text}")
             first_heading_written = True
         elif line.bold_share >= 0.6:
+            flush_text()
             parts.append(f"**{line.text}**")
         else:
-            parts.append(line.text)
+            if pending_line and line.y0 - pending_line.y0 <= max(line.size, pending_line.size) * 1.4:
+                pending_text.append(line.text)
+            else:
+                flush_text()
+                pending_text = [line.text]
+            pending_line = line
 
+    flush_text()
     return finish_markdown(parts)
 
 
@@ -237,7 +255,6 @@ def parse_pdf_to_markdown(
             )
         page_width = float(document[0].rect.width)
 
-    title = Path(display_name).stem.replace("_", " ").replace("-", " ").strip().title()
     if _detect_table_layout(lines, page_width):
         table, table_warnings = _table_markdown(lines, page_width)
         warnings.extend(table_warnings)
@@ -250,9 +267,7 @@ def parse_pdf_to_markdown(
                 ),
             )
         )
-        markdown = finish_markdown(
-            [f"# {title or 'PDF Document'}", "<!-- pdf-table-layout -->\n" + table]
-        )
+        markdown = finish_markdown(["<!-- pdf-table-layout -->\n" + table])
         strategy = "pdf_table_layout_to_markdown"
     else:
         markdown = _layout_markdown(lines)

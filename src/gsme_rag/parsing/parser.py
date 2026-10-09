@@ -4,7 +4,7 @@ import hashlib
 from gsme_rag.parsing.csv import parse_csv_to_markdown
 from gsme_rag.parsing.docx import parse_docx_to_markdown
 from gsme_rag.models import DocumentMetadata, ParsedDocument
-from gsme_rag.parsing.schedules import SCHEDULE_COLUMNS, make_source_id, resolve_schedule_kind
+from gsme_rag.parsing.schedules import is_schedule_header, make_source_id, resolve_schedule_kind
 from gsme_rag.parsing.pdf import parse_pdf_to_markdown
 
 
@@ -15,6 +15,8 @@ def parse_to_markdown(
 ) -> ParsedDocument:
     input_path = Path(path)
     suffix = input_path.suffix.casefold()
+    if suffix != ".csv" and schedule_kind in {"full", "shared"}:
+        raise ValueError("Full or Shared schedule type applies only to a schedule CSV")
     if suffix == ".docx":
         result = parse_docx_to_markdown(input_path, source_name=source_name)
     elif suffix == ".pdf":
@@ -28,9 +30,7 @@ def parse_to_markdown(
     # Header detection checks the table header itself, never row counts or dates.
     if suffix == ".csv":
         header = next((line for line in result.markdown.splitlines() if line.startswith("|")), "")
-        is_schedule = set(SCHEDULE_COLUMNS).issubset(
-            {cell.strip() for cell in header.strip("|").split("|")}
-        )
+        is_schedule = is_schedule_header(header.strip("|").split("|"))
     kind = resolve_schedule_kind(result.filename, schedule_kind) if is_schedule else None
     kind_source = (
         "filename" if kind and resolve_schedule_kind(result.filename) == kind
@@ -46,5 +46,6 @@ def parse_to_markdown(
         schedule_kind=kind,
         schedule_kind_source=kind_source,
         classification_status="needs_schedule_kind" if is_schedule and not kind else "ready",
+        csv_source_rows=result.csv_source_rows if is_schedule else None,
     )
     return result

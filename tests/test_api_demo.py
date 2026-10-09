@@ -74,8 +74,12 @@ class APIDemoTests(unittest.IsolatedAsyncioTestCase):
             ChunkRequest(markdown=markdown, source_file="FAQ.pdf")
         )
         self.assertEqual([c.category for c in result.chunks], ["General", "TapeOut Services"])
-        self.assertEqual(result.chunks[1].heading_path, ["TapeOut Services"])
+        self.assertEqual(result.chunks[1].category, "TapeOut Services")
         self.assertNotIn("General", result.chunks[1].text)
+        compact = result.chunks[1].model_dump(exclude_none=True)
+        self.assertNotIn("normalized_sha256", compact)
+        self.assertNotIn("schedule_kind", compact)
+        self.assertNotIn("part_count", compact)
 
     async def test_schedule_preview_filters_typed_csv(self) -> None:
         upload = UploadFile(
@@ -94,6 +98,23 @@ class APIDemoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.matched_records, 1)
         self.assertEqual(result.records[0].tapeout_date.isoformat(), "2026-11-11")
         self.assertEqual(result.records[0].schedule_kind, "full")
+
+    async def test_schedule_preview_accepts_original_export_header(self) -> None:
+        upload = UploadFile(
+            file=BytesIO(
+                b"Tech (nm),Flavor,Trial,Final,Tapeout,Est. Ship,\n"
+                b"28,HPC+ RF,8/26/2026,9/2/2026,9/9/2026,12/17/2026,\n"
+            ),
+            filename="shared_schedules.csv",
+        )
+        async def read(size: int = -1) -> bytes:
+            return upload.file.read(size)
+        upload.read = read
+        result = await routes.schedule_preview(upload, 28, "hpc+ rf", None, "auto")
+        self.assertEqual(result.total_records, 1)
+        self.assertEqual(result.matched_records, 1)
+        self.assertEqual(result.records[0].source_row_number, 2)
+        self.assertEqual(result.schedule_kind, "shared")
 
     async def test_generic_csv_schedule_label_is_in_both_outputs(self) -> None:
         data = (
@@ -115,7 +136,8 @@ class APIDemoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(structured.warnings, [])
         self.assertEqual(structured.records[0].source_id, parsed.metadata.source_id)
         self.assertEqual(structured.records[0].source_row_number, 2)
-        self.assertEqual(structured.records[0].retrieval_channel, "structured")
+        self.assertEqual(structured.retrieval_channel, "structured")
+        self.assertEqual(structured.schedule_kind_source, "user")
 
     async def test_unknown_schedule_cannot_enter_either_channel(self) -> None:
         data = (

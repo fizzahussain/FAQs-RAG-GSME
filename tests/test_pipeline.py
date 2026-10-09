@@ -7,6 +7,7 @@ from docx import Document
 import pymupdf as fitz
 
 from gsme_rag.chunking import chunk_markdown, compare_strategies
+from gsme_rag.models import chunk_to_record
 from gsme_rag.parsing import parse_to_markdown
 from gsme_rag.parsing.schedules import filter_schedule_records, parse_schedule_records
 from gsme_rag.parsing.schedules import resolve_schedule_kind
@@ -97,6 +98,12 @@ class ParsingStageTests(unittest.TestCase):
         self.assertIn("| 28 | HPC+ RF | Extra detail |", result.markdown)
         self.assertEqual(result.warnings[0].code, "uneven_csv_row")
 
+    def test_schedule_label_is_not_applied_to_unrelated_csv(self) -> None:
+        path = self.root / "misc.csv"
+        path.write_text("Name,Value\nA,1\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "known schedule columns"):
+            parse_to_markdown(path, schedule_kind="shared")
+
     def test_schedule_records_are_typed_and_keep_repeated_technology(self) -> None:
         path = self.root / "full_schedules.csv"
         path.write_text(
@@ -111,6 +118,56 @@ class ParsingStageTests(unittest.TestCase):
         self.assertEqual(records[0]["tapeout_date"].isoformat(), "2026-09-09")
         matched = filter_schedule_records(records, 28, "hpc+ rf", "2026-10-01")
         self.assertEqual([row["source_row_number"] for row in matched], [3])
+
+    def test_original_schedule_export_headers_and_blank_tail_are_supported(self) -> None:
+        path = self.root / "shared_schedules.csv"
+        path.write_text(
+            "Tech (nm),Flavor,Trial,Final,Tapeout,Est. Ship,\n"
+            "28,HPC+ RF,08/26/2026,09/02/2026,09/09/2026,12/17/2026,\n"
+            "65,LP,09/02/2026,09/09/2026,09/16/2026,12/13/2026,\n",
+            encoding="utf-8",
+        )
+        parsed = parse_to_markdown(path)
+        records = parse_schedule_records(path)
+        self.assertEqual(parsed.metadata.document_class, "schedule")
+        self.assertEqual(parsed.metadata.schedule_kind, "shared")
+        self.assertNotIn("Column 7", parsed.markdown)
+        self.assertEqual(parsed.warnings, [])
+        self.assertEqual([item["source_row_number"] for item in records], [2, 3])
+        self.assertEqual(len(filter_schedule_records(records, 28, "hpc+ rf")), 1)
+        self.assertEqual(chunk_markdown(parsed.markdown, path.name, metadata=parsed.metadata).chunks, [])
+
+    def test_optional_schedule_discovery_uses_physical_csv_row_numbers(self) -> None:
+        path = self.root / "full_schedules.csv"
+        path.write_text(
+            "Tech (nm),Flavor,Trial,Final,Tapeout,Est. Ship\n\n"
+            "28,HPC+ RF,08/26/2026,09/02/2026,09/09/2026,12/17/2026\n"
+            "\n65,LP,09/02/2026,09/09/2026,09/16/2026,12/13/2026\n",
+            encoding="utf-8",
+        )
+        parsed = parse_to_markdown(path)
+        discovery = chunk_markdown(
+            parsed.markdown, path.name, metadata=parsed.metadata,
+            semantic_schedule_rows=True,
+        )
+        self.assertEqual(parsed.metadata.csv_source_rows, [3, 5])
+        self.assertEqual([chunk.source_row_number for chunk in discovery.chunks], [3, 5])
+        edited = chunk_markdown(
+            parsed.markdown.replace("HPC+ RF", "HPC RF"), path.name,
+            metadata=parsed.metadata, semantic_schedule_rows=True,
+        )
+        self.assertTrue(all(chunk.source_row_number is None for chunk in edited.chunks))
+        self.assertIn("source_row_mapping_invalid", [item.code for item in edited.warnings])
+
+    def test_schedule_export_does_not_discard_nonempty_extra_column(self) -> None:
+        path = self.root / "full_schedules.csv"
+        path.write_text(
+            "Tech (nm),Flavor,Trial,Final,Tapeout,Est. Ship,\n"
+            "28,HPC+ RF,08/26/2026,09/02/2026,09/09/2026,12/17/2026,extra\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "more cells than column names"):
+            parse_schedule_records(path)
 
     def test_schedule_record_invalid_date_is_reported_with_row(self) -> None:
         path = self.root / "schedule.csv"
@@ -187,6 +244,22 @@ class ParsingStageTests(unittest.TestCase):
         self.assertEqual(result.document_type, "pdf")
         self.assertIn("<!-- page: 1 -->", result.markdown)
         self.assertIn("**01 What is Muse?**", result.markdown)
+
+    def test_pdf_soft_wrapped_answer_lines_join_without_changing_words(self) -> None:
+        path = self.root / "wrapped.pdf"
+        document = fitz.open()
+        page = document.new_page(width=612, height=792)
+        page.insert_text((50, 70), "General", fontname="hebo", fontsize=15)
+        page.insert_text((50, 105), "01 Where can I ask?", fontname="hebo", fontsize=11)
+        page.insert_text((50, 130), "Ask the team at support@example.com for", fontsize=11)
+        page.insert_text((50, 143), "the exact status of your request.", fontsize=11)
+        document.save(path)
+        document.close()
+        parsed = parse_to_markdown(path)
+        self.assertIn("support@example.com for the exact status", parsed.markdown)
+        chunks = chunk_markdown(parsed.markdown, path.name, metadata=parsed.metadata).chunks
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].category, "General")
 
     def test_pdf_equal_size_category_headings_are_siblings(self) -> None:
         path = self.root / "faqs.pdf"
@@ -265,7 +338,11 @@ class ChunkingStageTests(unittest.TestCase):
         )
         chunks = chunk_markdown(markdown, "faq.pdf").chunks
         self.assertEqual([chunk.category for chunk in chunks], ["General", "TapeOut Services"])
-        self.assertEqual(chunks[1].heading_path, ["FAQ Table"])
+        self.assertEqual(chunks[1].heading_path, ["TapeOut Services"])
+        self.assertNotIn("# FAQ Table", chunks[1].text)
+        self.assertIn("Question: What is the minimum area?", chunks[1].text)
+        self.assertIn("Answer:\n\nIt depends.", chunks[1].text)
+        self.assertNotIn("| Page |", chunks[1].text)
         self.assertEqual(chunks[1].source_page_start, 2)
 
     def test_auto_routes_mixed_document_by_block(self) -> None:
@@ -279,7 +356,7 @@ class ChunkingStageTests(unittest.TestCase):
             [chunk.chunk_type for chunk in result.chunks],
             ["question_answer", "table_row", "section", "section"],
         )
-        self.assertTrue(all(chunk.strategy_used == "auto" for chunk in result.chunks))
+        self.assertTrue(all(chunk.source_id for chunk in result.chunks))
         self.assertEqual(len({chunk.source_id for chunk in result.chunks}), 1)
         self.assertEqual(
             [chunk.chunk_id for chunk in result.chunks],
@@ -328,14 +405,50 @@ Muse provides semiconductor services.
         self.assertTrue(all("| Tech | Flavor |" in chunk.text for chunk in result.chunks))
 
     def test_long_table_row_is_not_split_from_its_header(self) -> None:
-        markdown = "# FAQ\n\n| Question | Answer |\n| --- | --- |\n"
-        markdown += f"| What happened? | {'Long answer ' * 40}|\n"
+        markdown = "# Measurements\n\n| Device | Value |\n| --- | --- |\n"
+        markdown += f"| Device A | {'Long value ' * 40}|\n"
         result = chunk_markdown(markdown, max_chars=200)
 
         self.assertEqual(len(result.chunks), 1)
-        self.assertIn("| Question | Answer |", result.chunks[0].text)
-        self.assertIn("What happened?", result.chunks[0].text)
+        self.assertIn("| Device | Value |", result.chunks[0].text)
+        self.assertIn("Device A", result.chunks[0].text)
         self.assertEqual(result.warnings[0].code, "oversized_unit")
+
+    def test_long_faq_table_answer_splits_with_question_and_row_identity(self) -> None:
+        markdown = "| Question | Answer |\n| --- | --- |\n"
+        markdown += f"| What is the process? | {'A verified step follows. ' * 32} |\n"
+        result = chunk_markdown(markdown, max_chars=240)
+        self.assertGreater(len(result.chunks), 1)
+        self.assertTrue(all(len(chunk.text) <= 240 for chunk in result.chunks))
+        self.assertTrue(all("Question: What is the process?" in chunk.text for chunk in result.chunks))
+        self.assertTrue(all(chunk.table_row_number == 2 for chunk in result.chunks))
+        self.assertTrue(all("unit_id" in chunk_to_record(chunk) for chunk in result.chunks))
+
+    def test_missing_faq_answer_is_not_indexed_as_evidence(self) -> None:
+        markdown = "| Question | Answer |\n| --- | --- |\n| Who approves it? |  |"
+        result = chunk_markdown(markdown)
+        self.assertEqual(result.chunks, [])
+        self.assertEqual(result.warnings[0].code, "faq_answer_missing")
+
+    def test_plain_chunk_excludes_empty_metadata_and_repeated_diagnostics(self) -> None:
+        result = chunk_markdown("# General\n\n**Who approves it?**\n\nThe lead.")
+        record = chunk_to_record(result.chunks[0])
+        self.assertEqual(record["category"], "General")
+        self.assertNotIn("normalized_sha256", record)
+        self.assertNotIn("schedule_kind", record)
+        self.assertNotIn("part_count", record)
+        self.assertNotIn("heading_path", record)
+
+    def test_bold_title_and_description_are_not_separate_tiny_chunks(self) -> None:
+        markdown = (
+            "**FAQ Table Without Header**\n\n"
+            "This table tests whether each question and answer remains in one row chunk.\n\n"
+            "| Question | Answer |\n| --- | --- |\n| Why? | Because. |"
+        )
+        result = chunk_markdown(markdown)
+        self.assertEqual(len(result.chunks), 2)
+        self.assertIn("FAQ Table Without Header", result.chunks[0].text)
+        self.assertEqual(result.chunks[1].chunk_type, "table_row")
 
     def test_table_page_and_row_number_are_preserved(self) -> None:
         markdown = "# FAQ\n\n| Question | Answer | Page |\n| --- | --- | --- |\n| Why? | Because. | 3 |"

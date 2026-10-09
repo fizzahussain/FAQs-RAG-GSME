@@ -1,86 +1,66 @@
-# Parsing and chunking: technical decision and audit
+# Parsing and chunking technical handoff
 
-Version 0.9.1 · Week 1 parsing; week 2 chunking · 9 October 2026
+Version 0.10.0 · 9 October 2026
 
-## Scope and current status
+## Decision and scope
 
-The project prepares two future retrieval channels. FAQ prose, FAQ tables, other documents and optional schedule descriptions produce semantic evidence chunks. Full and Shared schedules are validated as typed rows for exact filters. The current app previews the results in memory. It does **not** persist metadata, embed content, retrieve by vector similarity, call an LLM, or answer questions. Digital PDFs only; an image-only PDF reports `no_pdf_text`.
+Use deterministic, structure-aware normalization and automatic chunk routing for the known FAQ and document formats. Keep Full and Shared schedule CSVs in a separate typed-record path for exact lookup. The current application is a parsing and chunk preparation demo. It does not implement a database, an embedding index, live retrieval, an LLM, or the future KPI tool. Its output is an inspectable candidate for those systems, not evidence that retrieval accuracy has already been measured.
 
-The parser and chunker have a hard interface: `parse_to_markdown(file)` returns normalized Markdown plus a document metadata envelope, and `chunk_markdown(markdown, metadata)` does not open the file. A schedule schema also has a typed record reader; the exact-filter endpoint reads these records directly. In a future ingestion worker, the parser should emit both outputs in one transaction, then send each to its chosen index.
+The pipeline accepts DOCX, digital PDFs with selectable text, and CSV. OCR is deliberately outside this release. Parsing produces Markdown and one document metadata envelope. Chunking accepts only Markdown plus that envelope; it never reopens the uploaded document. Exact schedule filters instead read and validate CSV rows directly. Both downstream routes share a source identity, so they can later be joined without pretending that semantic similarity is an exact date filter.
 
-```text
-DOCX / digital PDF ── parser ── Markdown + source metadata ── auto chunker ── semantic candidates
-CSV schedule ──────── parser ── Markdown preview + metadata
-                 └── typed row validation ── exact filters / future structured store
-                                      └── optional labeled row projection ── semantic candidates
-```
-
-### Answer to the structured-data question
-
-No chunking is needed for exact schedule lookup. The record is already the atomic unit: technology is an integer, dates are dates, flavor is a string, and source row distinguishes repeated combinations. A table-row chunk is useful only as a **separate, optional** natural-language discovery projection. Never use semantic similarity to decide an exact date or which schedule type a row belongs to. Markdown is readable normalization, not the canonical type system for date filtering.
-
-## Four manual methods, and the operational default
-
-| Method | Behavior | Useful for | Problem with using it everywhere |
-| --- | --- | --- | --- |
-| `fixed_size` | Split at size boundaries with paragraph/sentence/word fallback | Baseline to show what arbitrary size loses | FAQ pairs and table rows can be detached |
-| `paragraph_aware` | FAQ and table units stay intact; ordinary prose is a paragraph per unit | Narrative, mixed prose with short paragraphs | Many small chunks; headings and context can be repeated |
-| `layout_aware` | FAQ pairs and table rows atomic; neighboring prose combines within section/page | FAQ and table documents | Can merge unrelated narrative paragraphs |
-| `hybrid` | Layout rules plus sentence overlap when a prose section needs splitting | Long narrative near boundaries | Duplicated text, bigger index, no benefit for short Q&A or rows |
-| `auto` **default** | FAQ pairing and table rows by block, prose paragraph units, sentence overlap only when prose exceeds budget | Unattended ingestion of known and mixed formats | Unknown layouts still need review and empirical retrieval tests |
-
-The four selectable methods are experiments; `auto` is the policy for future unattended ingestion. The browser resets to Auto after a parse. The backend routes each block, so the caller need not know whether a whole document is a table, FAQ, or life story. Bold or numbered standalone questions ending in `?` become anchors followed by answer paragraphs until another question/table/heading. A numbered question split across bold PDF lines is joined before pairing. The PDF parser normalizes same-size category headings as siblings; the chunker also replaces sibling headings even for older Markdown that starts with `## General` and has no document title. A Markdown table divider identifies a table; every data row repeats its header. Other paragraphs stay prose. Rhetorical italic questions inside a paragraph are not treated as FAQ anchors. Headings and page markers become context and provenance. When a unit exceeds `max_chars`, prose and Q&A answer bodies split while retaining their anchor; table rows remain intact and warn `oversized_unit`. The limit is **characters**, not embedding tokens.
-
-The code does not use an LLM for type classification. A lightweight LLM could help with nonstandard layouts later, but should be added only after a labeled failure set shows deterministic rules failing, with cost, latency and review of uncertain results measured. Do not claim the current pipeline understands any arbitrary document.
-
-## Metadata contract
-
-The response carries metadata; nothing is written to a database today. Keep it with the future stored row or vector:
-
-| Level | Field | Purpose |
+| Input | Normalization | Default output |
 | --- | --- | --- |
-| Document | `source_id`, `content_sha256` | Stable content identity and reprocessing detection |
-| Document | `normalized_sha256`, `parser_version`, `schema_version` | Identify the exact Markdown and parser contract used |
-| Document | `source_file`, `document_type`, `document_class` | Display source and route schedule vs document |
-| Document | `schedule_kind`, `schedule_kind_source`, `classification_status` | Full/Shared, label provenance (filename or user), and readiness |
-| Chunk | `chunk_id`, `unit_id`, `index`, `part_index`, `part_count` | Deterministic chunk IDs and reconstruction of split units |
-| Chunk | `chunk_type`, `category`, `heading_path`, `source_page_start/end`, `table_row_number`, `source_row_number` | Explicit FAQ category, evidence type, location and citation context |
-| Chunk | `strategy_used`, `routing_reason`, `retrieval_channel` | Audit how a semantic unit was formed |
-| Structured record | `record_id`, `source_id`, `source_file`, `source_row_number`, `schedule_kind/source`, typed fields | Exact row identity, filters and provenance |
+| Bold-question FAQ DOCX or PDF | Preserve headings, bold questions, answers and PDF page markers | One question and answer per semantic unit |
+| FAQ table DOCX or two-column PDF | Preserve a Markdown table; infer a missing two-column header or PDF columns with a warning | Category, question and answer per semantic unit |
+| Narrative or mixed document | Preserve ordinary paragraphs, headings and tables | Paragraph evidence, FAQ pairs and table rows as appropriate |
+| Full or Shared schedule CSV | Preserve a readable table and classify the known schedule schema | Typed rows for exact filters; zero default semantic chunks |
 
-`source_id` is based on source bytes plus its schedule label, and chunk IDs include source identity, Markdown hash, strategy, index and content. Identical bytes with the same label can share a source ID across filenames; a production store should add tenant, collection, logical document key and ingestion version to prevent cross-collection collisions. The demo makes no claim to provide tenancy or access control. Editing normalized Markdown causes `markdown_edited` and a new normalized hash; the displayed source ID still identifies the original upload.
+## What was corrected in this release
 
-For a generic schedule filename, schema recognition gives `document_class=schedule` but **cannot** determine Full versus Shared from row count, dates, or matching another uploaded CSV. The parser returns `needs_schedule_kind`. Both the chunk endpoint and exact-filter endpoint reject unlabeled rows with HTTP 422. Reparse with a user-supplied Full/Shared label, whose provenance is recorded. A conflicting filename and user label is also rejected.
+1. The headerless DOCX FAQ test no longer makes a separate 28-character chunk containing only its bold title. The short title and explanatory sentence form one context passage; each real FAQ row is separate.
+2. PDF table chunks no longer repeat a filename-derived heading or a full four-column Markdown table. The semantic text holds only a source category, a question and its answer. Page and row location remain metadata.
+3. PDF prose lines that are visibly soft-wrapped at a normal line gap join into one paragraph. Bold questions, headings and page boundaries remain explicit. A digital PDF may itself extract letters with unwanted spaces; those are not guessed away.
+4. An empty FAQ answer creates a review warning and no semantic evidence chunk. An answer longer than the character budget splits at text boundaries and repeats its question, with a shared unit ID and part numbers.
+5. Original schedule exports with `Tech (nm), Flavor, Trial, Final, Tapeout, Est. Ship` and their common empty trailing column now work in structured filtering. Canonical headers such as `technology_nm` also work. A nonempty unexpected column is rejected for structured use instead of silently dropped.
+6. Optional schedule discovery chunks use the physical CSV source row from parser metadata. If Markdown is edited after parsing, this row link is withheld with a warning. The structured CSV reader always computes the original physical row itself.
+7. Chunk responses omit the document hash, schedule nulls, classification diagnostics, constant channel and one-part splitting metadata from every FAQ chunk. Document hashes and Full/Shared classification remain in the parser envelope; the overall response states the strategy and channel.
 
-## Real-file observations
+## Chunking policy
 
-These are deterministic structure checks using the attached examples, not retrieval accuracy measurements.
+The `auto` choice applies rules per block, not one label to the entire file. A standalone bold or numbered question ending in a question mark anchors following answer paragraphs until the next question, heading or table. A PDF question split across bold lines is joined first. An italic rhetorical question inside a life-story paragraph remains prose. A Markdown table divider identifies rows; FAQ columns produce a compact question-and-answer projection, while other tables repeat their column headers with each intact row. Source category headings replace sibling headings rather than inheriting an earlier `General` category.
 
-| Attachment | Auto result | Baseline / noteworthy behavior |
+| Choice | Rule | Role |
 | --- | --- | --- |
-| Bold-question FAQ DOCX | 31 question–answer chunks | Fixed size yields 5 large chunks and can sever pairs |
-| Four-page FAQ-table PDF | 31 table-row chunks | Fixed size yields 7 chunks; row metadata retains page or page range |
-| Life-story DOCX | 8 prose chunks | Layout-aware merges to 4 sections; rhetorical questions stay prose |
-| Full schedule CSV | 33 typed rows; 0 default chunks | Optional projection: 33 labeled row chunks |
-| Shared schedule CSV | 14 typed rows; 0 default chunks | Optional projection: 14 labeled row chunks |
-| Generic filename copy | review required | Explicit Shared selection yields 14 typed rows and optional 14 chunks |
+| `auto` | FAQ pairs and rows by structure, separate ordinary paragraphs, split long prose with bounded overlap | Default for unattended known and mixed content |
+| `layout_aware` | FAQ pairs and rows by structure, group neighboring ordinary prose within a section or page | Manual experiment for documents with related prose |
+| `paragraph_aware` | FAQ pairs and rows by structure, keep ordinary paragraphs apart | Manual experiment for narrative |
+| `hybrid` | Group prose by section and use overlap when long sections split | Manual experiment when context crosses prose boundaries |
+| `fixed_size` | Split by size with paragraph and sentence fallback | Baseline only; may separate evidence and is blocked for schedule discovery |
 
-The automated suite includes 40 tests covering DOCX, PDF, CSV, headerless FAQ tables, mixed Markdown, category boundaries, wrapped PDF questions, page ranges, labels, IDs and ambiguous source blocking. Validation stops at parsing/chunk integrity: there is no embedding model or retrieval corpus for recall@k, MRR or answer faithfulness yet. Next, assemble 20–50 realistic questions with gold source rows or passages, compare retrieval after indexing, and tune token budgets/overlap on that evidence. Large merged cells, multi-column PDF ordering and ambiguous table header inference remain manual-review risks.
+The size control is in **characters**, not model tokens. Long FAQ answers can split while keeping their question and row identity. Non-FAQ table rows remain intact so values are not detached from their headers; if such a row exceeds the budget, `oversized_unit` requires inspection. The parser does not infer an answer from a question or repair illegible source text with an LLM. Changes to the routing policy should be driven by a reviewed retrieval benchmark, not by the apparent neatness of chunks.
 
-## External review and why this implementation stays small
+## Minimal metadata contract
 
-Docling describes hierarchical chunking with metadata and token-aware refinements, including repeating table headers. Unstructured isolates tables, groups by title and only splits oversized elements. LangChain offers Markdown header splitters. These support a structure-first design, while their general-purpose dependency surfaces would add complexity to this bounded demo. They are candidates if new documents defeat the current parser. Reddit discussions about mixed prose/tables and LinkedIn practitioner posts raise the same table-context concern; they are anecdotal, not benchmark evidence.
+Nothing is persisted in the current demo. The parser response contains `source_id`, source and normalized SHA-256 hashes, `source_file`, `document_type`, `document_class`, version fields and classification status. A schedule additionally has `schedule_kind`, the filename/user origin of that label, and `csv_source_rows` to maintain physical source locations through optional Markdown discovery. Those document-level values are sent once as the metadata object when chunking.
 
-- Docling official docs: https://docling-project.github.io/docling/concepts/chunking/
-- Unstructured official docs: https://docs.unstructured.io/concepts/chunking
-- LangChain source: https://github.com/langchain-ai/langchain/blob/master/libs/text-splitters/langchain_text_splitters/markdown.py
-- Reddit discussion (practitioner anecdote): https://www.reddit.com/r/Rag/comments/1v2vkie/how_do_people_usually_handle_chunking_for/
-- LinkedIn discussion (practitioner anecdote): https://www.linkedin.com/posts/v-tsybin_how-to-work-with-tables-in-a-rag-system-activity-7466447615799422976-Wv9j
+Each semantic chunk carries an ID, text, type, source ID and filename, index and only applicable category or location. A page end appears only when different from the start; heading paths appear when they add context beyond a single category. A split unit also carries `unit_id`, `part_index` and `part_count`. Schedule kind and physical source row appear only on optional schedule discovery chunks. Retrieval channel and selected strategy appear once on the chunk response, not on every item. This keeps a chunk independently attributable without filling FAQ output with schedule nulls or the same document hash repeatedly.
 
-## Next engineering steps
+The structured response carries its Full/Shared label and label provenance once. Each typed record carries `record_id`, `source_id`, `source_file`, `source_row_number`, `schedule_kind`, integer `technology_nm`, `flavor` and four validated dates. Repeated technology and flavor values are legitimate separate records; do not deduplicate them. These are the facts a future schedule query or KPI calculation must use. The current application offers exact in-memory filters but does not compute or publish KPI metrics.
 
-1. Agree on benchmark questions and expected source rows/passages, including date comparisons, repeated schedule combinations, long answers and PDF cross-page tables.
-2. Choose an embedding model, count with its tokenizer, and measure retrieval metrics. Tune chunk sizes and overlap from those results.
-3. Add a structured store for typed schedules and a semantic index for chunks; carry metadata through ingestion and deletion/versioning.
-4. Add retrieval routing and join results by `source_id`; only then add answer generation with citations.
-5. Add authentication, upload controls and operational logging before using confidential source files on a public deployment.
+For an ambiguously named schedule file, the known header establishes that it is a schedule but cannot establish Full versus Shared. The parser reports `needs_schedule_kind`, and both downstream paths reject it until the user supplies a label. A clear contradictory filename and user label are also rejected. Neither the row count nor dates are used to guess schedule type.
+
+## Evidence from supplied material
+
+At the default 1,800-character budget, the supplied bold-question FAQ DOCX yielded 31 question-answer chunks. The supplied FAQ-table PDF yielded 31 category-labeled table-row chunks, and the separate QA PDF contained the corresponding 31 FAQ questions plus one introductory prose passage. Each had the same category distribution: 8 General, 12 TapeOut Services, 7 Additional Services and 4 Shared Block tapeout. The headerless table test has 3 FAQ rows plus one context passage. The life-story DOCX yielded 8 prose chunks and no invented FAQ question from its rhetorical prose. The original Full and Shared exports produced 33 and 14 typed records respectively; default semantic schedule chunk count is zero. These are structural and content-preservation checks, not retrieval scores.
+
+The automated suite covers 50 scenarios including PDF category changes, wrapped questions, page spans, headerless Word tables, split FAQ answers, missing answers, narrative paragraphs, original and normalized CSV headers, blank trailing columns, physical CSV row numbers and ambiguous schedule labels. The two actual schedule exports were also read as typed records and checked for row counts. Do not claim 100 percent accuracy from these tests: unfamiliar table geometries, merged cells, reading order and unusual headings remain unmeasured.
+
+## Limits and release gate for future retrieval
+
+The PDF table recognizer uses positions and issues `pdf_table_inferred` because arbitrary multi-column PDFs can reorder cells. Inspect a new PDF type against the original before indexing. Digital PDF text extraction can return fractured words (the supplied QA PDF contains examples); automatically repairing them would risk inventing text. Image-only PDFs return `no_pdf_text`. Very large, unusual or malformed DOCX tables also require review. Plain Markdown supplied without parse metadata loses source page and physical CSV row provenance.
+
+For the next phase, assemble reviewed questions with expected passages and schedule rows. Test semantic recall at several top-k values, category and page citations, and structured exact filters separately. Include repeated schedule values, cross-page answers, missing answers, unfamiliar table layouts and long FAQ answers. Choose an embedding model and use its tokenizer to calibrate a token budget before building the persistent index. The future KPI tool must aggregate typed, dated records under a separately approved metric definition. Add access controls before accepting confidential company files on the public demo.
+
+## Run and deploy
+
+Use Python 3.11 or newer. From the project root: `python -m pip install -e .`, `python -m unittest discover -s tests -v`, then `python -m gsme_rag.api.run`. On Windows, call the explicit `.venv\Scripts\python.exe` for all three commands. The browser demo is at `/`, API documentation at `/docs`, and the health route at `/v1/health`. Render uses `render.yaml`, builds with `pip install .`, starts `python -m gsme_rag.api.run` and injects `PORT`. Push the updated branch to trigger its redeploy, then verify the public health route and representative samples.

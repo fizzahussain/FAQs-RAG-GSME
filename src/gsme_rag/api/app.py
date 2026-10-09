@@ -7,7 +7,7 @@ from gsme_rag.api.routes import router
 def create_app() -> FastAPI:
     app = FastAPI(
         title="GSME RAG Pipeline Demo",
-        version="0.9.1",
+        version="0.10.0",
         description=(
             "Stage 1 normalizes DOCX, born-digital PDF, or CSV input to Markdown. "
             "Stage 2 routes semantic Markdown units automatically. Schedule CSVs "
@@ -82,7 +82,7 @@ DEMO_PAGE = """
     <label for="overlap-chars">Long prose overlap (automatic or hybrid)</label>
     <input id="overlap-chars" type="number" min="0" value="120">
     <label><input id="semantic-schedule-rows" type="checkbox"> Also create semantic discovery chunks for schedule rows</label>
-    <p class="note">Schedule CSVs normally use typed rows in section 3. Optional semantic chunks keep each row and its header; exact dates still come from section 3.</p>
+    <p class="note">Schedule CSVs normally use typed rows in section 3. Optional semantic discovery keeps one row per chunk; exact dates still come from section 3.</p>
     <br>
     <button id="chunk" disabled>Chunk Markdown</button>
     <pre id="chunk-output">Chunk records will appear here.</pre>

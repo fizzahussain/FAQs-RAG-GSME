@@ -23,6 +23,7 @@ class DocumentMetadataOut(BaseModel):
     classification_status: str
     schema_version: str
     parser_version: str
+    csv_source_rows: list[int] | None = None
 
 
 class ParseResponse(BaseModel):
@@ -48,9 +49,6 @@ class ScheduleRecordOut(BaseModel):
     source_id: str = ""
     record_id: str = ""
     source_file: str = ""
-    schedule_kind_source: str | None = None
-    retrieval_channel: Literal["structured"] = "structured"
-    schema_version: str = "1"
 
 
 class SchedulePreviewResponse(BaseModel):
@@ -61,6 +59,7 @@ class SchedulePreviewResponse(BaseModel):
     records: list[ScheduleRecordOut]
     warnings: list[ParseWarningOut]
     source_id: str = ""
+    schedule_kind_source: str | None = None
     classification_status: str = "ready"
     retrieval_channel: Literal["structured"] = "structured"
 
@@ -81,25 +80,16 @@ class MarkdownChunkOut(BaseModel):
     text: str
     chunk_type: str
     source_file: str
-    heading_path: list[str]
+    heading_path: list[str] | None = None
     category: str | None = None
     source_page_start: int | None = None
     source_page_end: int | None = None
     table_row_number: int | None = None
-    unit_id: str
-    part_index: int = Field(ge=0)
-    part_count: int = Field(ge=1)
-    character_count: int = Field(ge=0)
+    unit_id: str | None = None
+    part_index: int | None = Field(default=None, ge=0)
+    part_count: int | None = Field(default=None, ge=1)
     source_id: str
-    normalized_sha256: str
-    document_type: str
-    document_class: str
     schedule_kind: Literal["full", "shared"] | None = None
-    schedule_kind_source: str | None = None
-    retrieval_channel: Literal["semantic"]
-    strategy_used: str
-    routing_reason: str
-    schema_version: str
     source_row_number: int | None = None
 
 

@@ -6,7 +6,7 @@ import sys
 
 from gsme_rag.chunking import chunk_markdown, compare_strategies
 from gsme_rag.parsing import parse_to_markdown
-from gsme_rag.models import DocumentMetadata
+from gsme_rag.models import DocumentMetadata, chunk_to_record
 
 
 def _print_warnings(warnings) -> None:
@@ -43,10 +43,7 @@ def _chunk_command(args: argparse.Namespace) -> int:
         "strategy": args.strategy,
         "overlap_chars": args.overlap_chars if args.strategy in {"auto", "hybrid"} else 0,
         "chunk_count": len(result.chunks),
-        "chunks": [
-            {**asdict(chunk), "character_count": chunk.character_count}
-            for chunk in result.chunks
-        ],
+        "chunks": [chunk_to_record(chunk) for chunk in result.chunks],
         "warnings": [asdict(warning) for warning in result.warnings],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
