@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import re
 from typing import Literal
 
 
@@ -36,6 +37,46 @@ class ParsedDocument:
     csv_source_rows: list[int] | None = None
 
 
+def _extract_faq_question(
+    chunk_type: str,
+    text: str,
+    heading_path: list[str],
+) -> str | None:
+    """Extract a question only from a recognized FAQ chunk."""
+    if chunk_type == "table_row":
+        match = re.search(
+            r"(?:^|\n)Question:\s*(.*?)\n\nAnswer:",
+            text,
+            flags=re.DOTALL,
+        )
+        if not match:
+            return None
+        question = match.group(1)
+
+    elif chunk_type == "question_answer":
+        content = text
+        if heading_path:
+            _, separator, remainder = content.partition("\n\n")
+            if separator:
+                content = remainder
+
+        question = content.split("\n\n", 1)[0].strip()
+
+        if question.startswith("**") and question.endswith("**"):
+            question = question[2:-2]
+        elif question.startswith("__") and question.endswith("__"):
+            question = question[2:-2]
+
+        if not question.strip().endswith("?"):
+            return None
+
+    else:
+        return None
+
+    question = re.sub(r"\s+", " ", question).strip()
+    return question or None
+
+
 @dataclass(slots=True)
 class MarkdownChunk:
     chunk_id: str
@@ -54,6 +95,15 @@ class MarkdownChunk:
     source_id: str = ""
     schedule_kind: str | None = None
     source_row_number: int | None = None
+    faq_question: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.faq_question is None:
+            self.faq_question = _extract_faq_question(
+                self.chunk_type,
+                self.text,
+                self.heading_path,
+            )
 
     @property
     def character_count(self) -> int:
@@ -74,6 +124,8 @@ def chunk_to_record(chunk: MarkdownChunk) -> dict:
         record["category"] = chunk.category
     if chunk.heading_path and chunk.heading_path != [chunk.category]:
         record["heading_path"] = chunk.heading_path
+    if chunk.faq_question:
+        record["faq_question"] = chunk.faq_question
     if chunk.source_page_start is not None:
         record["source_page_start"] = chunk.source_page_start
         if chunk.source_page_end != chunk.source_page_start:
