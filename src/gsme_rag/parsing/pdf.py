@@ -156,7 +156,11 @@ def _table_markdown(lines: list[_Line], page_width: float) -> tuple[str, list[Pa
                 question["category"],
                 question_text,
                 answer,
-                str(question["page"]),
+                (
+                    str(question["page"])
+                    if not answer_lines or answer_lines[-1].page == question["page"]
+                    else f"{question['page']}-{answer_lines[-1].page}"
+                ),
             ]
         )
 
@@ -166,9 +170,21 @@ def _table_markdown(lines: list[_Line], page_width: float) -> tuple[str, list[Pa
 def _layout_markdown(lines: list[_Line]) -> str:
     sizes = [line.size for line in lines if 7 <= line.size <= 18]
     body_size = median(sizes) if sizes else 11.0
+    headings = [
+        line for line in lines
+        if line.bold_share >= 0.6
+        and line.size >= body_size * 1.12
+        and "?" not in line.text
+        and len(line.text) <= 100
+    ]
+    has_document_title = (
+        len(headings) > 1
+        and headings[0].size >= body_size * 1.5
+        and headings[0].size >= max(line.size for line in headings[1:]) * 1.2
+    )
     parts: list[str] = []
     active_page: int | None = None
-    title_written = False
+    first_heading_written = False
 
     for line in lines:
         if line.page != active_page:
@@ -182,9 +198,9 @@ def _layout_markdown(lines: list[_Line]) -> str:
             and len(line.text) <= 100
         )
         if is_heading:
-            level = 1 if not title_written and line.size >= body_size * 1.5 else 2
+            level = 1 if not has_document_title or not first_heading_written else 2
             parts.append(f"{'#' * level} {line.text}")
-            title_written = True
+            first_heading_written = True
         elif line.bold_share >= 0.6:
             parts.append(f"**{line.text}**")
         else:

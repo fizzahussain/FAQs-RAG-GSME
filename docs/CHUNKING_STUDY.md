@@ -1,5 +1,7 @@
 # Chunking study: how to defend the decision
 
+Historical strategy comparison. Current automatic routing and structured schedule rules are in [TECHNICAL_GUIDE.md](TECHNICAL_GUIDE.md).
+
 ## Scope
 
 The parser produces Markdown from DOCX, selectable-text PDF, or CSV. The
@@ -43,6 +45,19 @@ Check inferred columns and page references against the source. At 400
 characters, 12 rows exceed the limit and remain whole with warnings. The full
 schedule CSV has 33 rows. Each row is a good candidate for semantic chunking,
 while the typed schedule preview handles exact fields and dates independently.
+
+In the supplied Word FAQ, fixed size leaves 27 of 31 complete answers in a
+single chunk; the supplied PDF leaves 26 of 31 complete rows in one chunk.
+Layout-aware keeps all 31 units intact in each case at the default size. The
+PDF also has three answers that span pages. The parser records page ranges in
+the normalized table and the chunk metadata. In the synthetic headerless FAQ
+table, paragraph-aware makes separate title and introduction chunks, while
+layout-aware keeps the introductory prose together and the three rows intact.
+
+The localhost page now suggests a method after parsing and lets you inspect
+one strategy at a time. The comparison interface and evidence-excerpt fields
+were removed from the page. CLI comparison remains available for technical
+evaluation; it does not imply that the future semantic search has been tested.
 
 ## Repeatable run
 

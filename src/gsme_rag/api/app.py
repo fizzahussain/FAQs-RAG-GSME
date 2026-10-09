@@ -7,11 +7,11 @@ from gsme_rag.api.routes import router
 def create_app() -> FastAPI:
     app = FastAPI(
         title="GSME RAG Pipeline Demo",
-        version="0.7.0",
+        version="0.9.1",
         description=(
             "Stage 1 normalizes DOCX, born-digital PDF, or CSV input to Markdown. "
-            "Stage 2 compares four chunking strategies on that Markdown. "
-            "Schedule CSVs also have a typed record preview."
+            "Stage 2 routes semantic Markdown units automatically. Schedule CSVs "
+            "produce typed records for exact filtering; their semantic rows are optional."
         ),
     )
     app.include_router(router)
@@ -46,12 +46,19 @@ DEMO_PAGE = """
 </head>
 <body>
   <h1>GSME RAG Pipeline Demo</h1>
-  <p class="note">Parsing creates Markdown. Chunking receives only Markdown. Schedule CSVs can also be inspected as typed records.</p>
+  <p class="note">Week 1: files become Markdown. Week 2: semantic text becomes evidence chunks. Schedules produce exact, typed rows with source metadata.</p>
 
   <section>
     <h2>1. Parse file to Markdown</h2>
     <label for="file">DOCX, digital PDF, or CSV</label>
     <input id="file" type="file" accept=".docx,.pdf,.csv">
+    <label for="schedule-kind">Schedule type (CSV only)</label>
+    <select id="schedule-kind">
+      <option value="auto">Use filename</option>
+      <option value="full">Full schedules</option>
+      <option value="shared">Shared schedules</option>
+    </select>
+    <p class="note">For a generic schedule filename, select Full or Shared. The preview will block unlabeled schedule rows from chunking and filtering.</p>
     <br>
     <button id="parse">Parse to Markdown</button>
     <pre id="parse-meta">Parser result details will appear here.</pre>
@@ -61,37 +68,29 @@ DEMO_PAGE = """
 
   <section>
     <h2>2. Chunk normalized Markdown</h2>
+    <p id="recommendation" class="note">A suggested method will appear after parsing.</p>
     <label for="strategy">Chunking strategy</label>
     <select id="strategy">
+      <option value="auto">Automatic: route each content block by structure (default)</option>
       <option value="layout_aware">Layout aware: FAQ pairs, table rows, sections</option>
-      <option value="fixed_size">Size based: comparison baseline</option>
+      <option value="fixed_size">Size based: simple baseline</option>
       <option value="hybrid">Hybrid: layout aware with overlap for long prose</option>
       <option value="paragraph_aware">Paragraph aware: preserve narrative paragraphs</option>
     </select>
     <label for="max-chars">Maximum characters per chunk</label>
     <input id="max-chars" type="number" min="200" max="20000" value="1800">
-    <label for="overlap-chars">Long prose overlap (hybrid only)</label>
+    <label for="overlap-chars">Long prose overlap (automatic or hybrid)</label>
     <input id="overlap-chars" type="number" min="0" value="120">
+    <label><input id="semantic-schedule-rows" type="checkbox"> Also create semantic discovery chunks for schedule rows</label>
+    <p class="note">Schedule CSVs normally use typed rows in section 3. Optional semantic chunks keep each row and its header; exact dates still come from section 3.</p>
     <br>
     <button id="chunk" disabled>Chunk Markdown</button>
     <pre id="chunk-output">Chunk records will appear here.</pre>
   </section>
 
   <section>
-    <h2>3. Compare all strategies</h2>
-    <p class="note">Optional evidence check: paste a short excerpt exactly as it appears in the Markdown. Keyword ranking is only a retrieval proxy.</p>
-    <label for="question">Question</label>
-    <input id="question" type="text" placeholder="Why was the review step added?" size="55">
-    <label for="evidence">Expected evidence excerpt</label>
-    <input id="evidence" type="text" placeholder="This step reduced the chance..." size="70">
-    <br>
-    <button id="compare">Compare four strategies</button>
-    <pre id="compare-output">Comparison report will appear here.</pre>
-  </section>
-
-  <section>
-    <h2>4. Preview structured schedule rows</h2>
-    <p class="note">Select a schedule CSV above. This reads typed rows directly from the CSV and filters them in memory; it does not use the Markdown or a database.</p>
+    <h2>3. Exact schedule filters (structured path)</h2>
+    <p class="note">Select a schedule CSV above. Typed rows and provenance are filtered in memory. This separate preview does not need chunks or a database.</p>
     <label for="technology">Technology (nm), optional</label>
     <input id="technology" type="number" min="0" placeholder="28">
     <label for="flavor">Flavor, optional exact match</label>
@@ -112,14 +111,29 @@ DEMO_PAGE = """
     const markdown = document.getElementById('markdown');
     const chunkButton = document.getElementById('chunk');
     const chunkOutput = document.getElementById('chunk-output');
-    const compareButton = document.getElementById('compare');
-    const compareOutput = document.getElementById('compare-output');
     const scheduleButton = document.getElementById('schedule');
     const scheduleOutput = document.getElementById('schedule-output');
     let sourceFile = 'normalized.md';
+    let documentMetadata = null;
+
+    fileInput.addEventListener('change', () => {
+      document.getElementById('schedule-kind').value = 'auto';
+      documentMetadata = null;
+      sourceFile = 'normalized.md';
+      markdown.value = '';
+      chunkButton.disabled = true;
+    });
+
+    document.getElementById('schedule-kind').addEventListener('change', () => {
+      documentMetadata = null;
+      chunkButton.disabled = true;
+      document.getElementById('recommendation').textContent =
+        'Parse again to attach the selected schedule type to the source.';
+    });
 
     markdown.addEventListener('input', () => {
-      chunkButton.disabled = !markdown.value.trim();
+      chunkButton.disabled = !markdown.value.trim() ||
+        (documentMetadata && documentMetadata.classification_status !== 'ready');
     });
 
     parseButton.addEventListener('click', async () => {
@@ -133,16 +147,23 @@ DEMO_PAGE = """
       parseMeta.textContent = 'Parsing file to Markdown...';
       const data = new FormData();
       data.append('file', file);
+      data.append('schedule_kind', document.getElementById('schedule-kind').value);
       try {
         const response = await fetch('/v1/parse', { method: 'POST', body: data });
         const result = await response.json();
         if (!response.ok) throw new Error(JSON.stringify(result));
         sourceFile = result.filename;
+        documentMetadata = result.metadata;
         markdown.value = result.markdown;
         const details = { ...result };
         delete details.markdown;
         parseMeta.textContent = JSON.stringify(details, null, 2);
-        chunkButton.disabled = !result.markdown.trim();
+        document.getElementById('strategy').value = 'auto';
+        document.getElementById('recommendation').textContent =
+          result.metadata.classification_status === 'ready'
+            ? 'Automatic routing pairs FAQs, preserves table rows, and separates prose paragraphs.'
+            : 'Schedule type needs review. Select Full or Shared and parse again.';
+        chunkButton.disabled = !result.markdown.trim() || result.metadata.classification_status !== 'ready';
       } catch (error) {
         parseMeta.textContent = String(error);
       } finally {
@@ -162,7 +183,9 @@ DEMO_PAGE = """
             source_file: sourceFile,
             max_chars: Number(document.getElementById('max-chars').value),
             strategy: document.getElementById('strategy').value,
-            overlap_chars: Number(document.getElementById('overlap-chars').value)
+            overlap_chars: Number(document.getElementById('overlap-chars').value),
+            metadata: documentMetadata,
+            semantic_schedule_rows: document.getElementById('semantic-schedule-rows').checked
           })
         });
         const result = await response.json();
@@ -172,41 +195,6 @@ DEMO_PAGE = """
         chunkOutput.textContent = String(error);
       } finally {
         chunkButton.disabled = false;
-      }
-    });
-
-    compareButton.addEventListener('click', async () => {
-      if (!markdown.value.trim()) {
-        compareOutput.textContent = 'Parse a file or paste Markdown first.';
-        return;
-      }
-      const question = document.getElementById('question').value.trim();
-      const evidence = document.getElementById('evidence').value.trim();
-      if (Boolean(question) !== Boolean(evidence)) {
-        compareOutput.textContent = 'Enter both a question and an evidence excerpt, or leave both blank.';
-        return;
-      }
-      compareButton.disabled = true;
-      compareOutput.textContent = 'Comparing...';
-      try {
-        const response = await fetch('/v1/compare', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            markdown: markdown.value,
-            source_file: sourceFile,
-            max_chars: Number(document.getElementById('max-chars').value),
-            overlap_chars: Number(document.getElementById('overlap-chars').value),
-            cases: question ? [{ question, evidence }] : []
-          })
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(JSON.stringify(result));
-        compareOutput.textContent = JSON.stringify(result, null, 2);
-      } catch (error) {
-        compareOutput.textContent = String(error);
-      } finally {
-        compareButton.disabled = false;
       }
     });
 
@@ -225,6 +213,7 @@ DEMO_PAGE = """
       if (afterDate) params.set('tapeout_on_or_after', afterDate);
       const data = new FormData();
       data.append('file', file);
+      data.append('schedule_kind', document.getElementById('schedule-kind').value);
       scheduleButton.disabled = true;
       scheduleOutput.textContent = 'Reading structured records...';
       try {

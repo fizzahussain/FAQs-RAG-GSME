@@ -1,21 +1,50 @@
 from pathlib import Path
+import hashlib
 
 from gsme_rag.parsing.csv import parse_csv_to_markdown
 from gsme_rag.parsing.docx import parse_docx_to_markdown
-from gsme_rag.models import ParsedDocument
+from gsme_rag.models import DocumentMetadata, ParsedDocument
+from gsme_rag.parsing.schedules import SCHEDULE_COLUMNS, make_source_id, resolve_schedule_kind
 from gsme_rag.parsing.pdf import parse_pdf_to_markdown
 
 
 def parse_to_markdown(
     path: str | Path,
     source_name: str | None = None,
+    schedule_kind: str | None = None,
 ) -> ParsedDocument:
     input_path = Path(path)
     suffix = input_path.suffix.casefold()
     if suffix == ".docx":
-        return parse_docx_to_markdown(input_path, source_name=source_name)
-    if suffix == ".pdf":
-        return parse_pdf_to_markdown(input_path, source_name=source_name)
+        result = parse_docx_to_markdown(input_path, source_name=source_name)
+    elif suffix == ".pdf":
+        result = parse_pdf_to_markdown(input_path, source_name=source_name)
+    elif suffix == ".csv":
+        result = parse_csv_to_markdown(input_path, source_name=source_name, schedule_kind=schedule_kind)
+    else:
+        raise ValueError("Input must be a DOCX, born-digital PDF, or CSV file")
+    digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    is_schedule = False
+    # Header detection checks the table header itself, never row counts or dates.
     if suffix == ".csv":
-        return parse_csv_to_markdown(input_path, source_name=source_name)
-    raise ValueError("Input must be a DOCX, born-digital PDF, or CSV file")
+        header = next((line for line in result.markdown.splitlines() if line.startswith("|")), "")
+        is_schedule = set(SCHEDULE_COLUMNS).issubset(
+            {cell.strip() for cell in header.strip("|").split("|")}
+        )
+    kind = resolve_schedule_kind(result.filename, schedule_kind) if is_schedule else None
+    kind_source = (
+        "filename" if kind and resolve_schedule_kind(result.filename) == kind
+        else "user" if kind else None
+    )
+    result.metadata = DocumentMetadata(
+        source_id=make_source_id(digest, kind),
+        content_sha256=digest,
+        normalized_sha256=hashlib.sha256(result.markdown.encode("utf-8")).hexdigest(),
+        source_file=result.filename,
+        document_type=result.document_type,
+        document_class="schedule" if is_schedule else "document",
+        schedule_kind=kind,
+        schedule_kind_source=kind_source,
+        classification_status="needs_schedule_kind" if is_schedule and not kind else "ready",
+    )
+    return result

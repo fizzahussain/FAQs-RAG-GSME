@@ -1,5 +1,7 @@
 # Weekly team brief
 
+Historical draft. Current findings and next steps are in [TECHNICAL_GUIDE.md](TECHNICAL_GUIDE.md).
+
 ## What has been built
 
 We separated file parsing from chunking. DOCX, selectable-text PDF, and CSV
@@ -22,11 +24,11 @@ remain whole with a warning.
 
 1. Upload a file and inspect normalized Markdown before chunking.
 2. Edit or paste Markdown and inspect chunks under each strategy.
-3. Compare all strategies on the same Markdown and one known evidence case
-   in the browser, or on many cases with the CLI.
+3. Choose the suggested method in the browser, or run a separate CLI
+   comparison on multiple reviewed evidence cases for internal evaluation.
 4. Show a normal narrative document whose facts can be chunked even though
    the document does not contain the user's question.
-5. Upload the full schedule CSV in section 4, filter by technology, flavor,
+5. Upload the full schedule CSV in section 3, filter by technology, flavor,
    and a tapeout date, and inspect the source row numbers.
 
 ## What remains uncertain

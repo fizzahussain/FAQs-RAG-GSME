@@ -1,309 +1,63 @@
-# GSME RAG: Parsing and Chunking Lab
+# GSME RAG: parsing and chunking demo
 
-This is a runnable lab for the first two stages of the GSME RAG pipeline. Parsing output is inspectable and chunking decisions are comparable before retrieval, storage, and answer generation are added.
+This is the first two weeks of a future RAG system. The parser normalizes DOCX, digital PDF and CSV files to Markdown. The chunker reads Markdown and document metadata, then prepares evidence for a future semantic index. The schedule CSV path separately validates typed rows for exact filters. No database, vector index, embeddings, LLM, OCR or answer generation is included.
 
-```text
-DOCX, digital PDF, or CSV
-            |
-            v
-Parser: file to normalized Markdown
-            |
-            v
-Editable and inspectable Markdown
-            |
-            v
-Chunker: Markdown to comparable chunks
+## The decision
+
+| Input | Parser output | Default downstream path |
+| --- | --- | --- |
+| FAQ prose | Markdown with bold questions | One question with its answer per semantic chunk |
+| FAQ table | Markdown table | One row with repeated headers per semantic chunk |
+| Ordinary narrative | Markdown paragraphs | One paragraph per semantic chunk; oversized prose splits with sentence overlap |
+| Full or shared schedule CSV | Markdown table and typed schedule records | Typed records for exact filters; semantic row chunks are optional |
+| Other CSV | Markdown table | Table rows with repeated headers for semantic inspection |
+
+**Do not chunk a schedule CSV merely to perform structured search.** Exact technology, flavor and date filters use typed records. If discovery by natural language is later required, enable the optional semantic projection and keep every row labeled Full or Shared. The two channels have separate output metadata.
+
+The four manual methods remain available as an experiment: `fixed_size` (baseline), `paragraph_aware`, `layout_aware`, and `hybrid`. The operational default is `auto`, which routes *each block*, so a mixed document can contain FAQ pairs, table rows and prose in one run. See [technical guide](docs/TECHNICAL_GUIDE.md).
+
+## Run locally on Windows PowerShell
+
+Extract the ZIP and open PowerShell in the folder containing `pyproject.toml`. If a previous `.venv` is broken, close old terminals, then remove or rename that old folder first. Run these commands one at a time:
+
+```powershell
+py -3.13 -m venv .venv
+Test-Path .\.venv\Scripts\python.exe
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m gsme_rag.api.run
 ```
 
-The parser never creates chunks. The chunker never opens the original source file.
+If `py -3.13` is unavailable, use `py -m venv .venv` with your installed Python 3.11 or newer. `Test-Path` must print `True`; if it does not, repair the environment before installing. Use the explicit `.venv\Scripts\python.exe` commands rather than bare `pip` or `gsme-rag-api`, which may resolve to your user installation. Visit `http://127.0.0.1:8000/` for the simple browser demo or `/docs` for FastAPI documentation. Stop with Ctrl+C.
 
-Schedule CSVs can also be inspected as typed records with in-memory filters.
-There is no database, embedding model, semantic retrieval, or OCR.
-
-## Project structure
-
-```text
-src/gsme_rag/
-├── parsing/
-│   ├── parser.py
-│   ├── docx.py
-│   ├── pdf.py
-│   ├── csv.py
-│   ├── schedules.py
-│   └── markdown.py
-├── chunking/
-│   ├── chunker.py
-│   └── evaluate.py
-├── api/
-│   ├── app.py
-│   ├── routes.py
-│   └── schemas.py
-├── models.py
-├── text.py
-└── cli.py
-docs/
-├── CHUNKING_STUDY.md
-└── TEAM_BRIEF.md
-```
-
-The `parsing` package normalizes source files to Markdown and can separately
-read the known schedule CSV fields as typed records. The `chunking` package
-receives Markdown text and has no source-file parsing dependencies. The `api`
-package connects the stages through separate endpoints.
-
-## Stage 1: parsing
-
-The parsing endpoint accepts one supported file and returns normalized Markdown.
-
-| Input | Markdown normalization |
-| --- | --- |
-| DOCX | Headings, formatted paragraphs, lists, and native tables |
-| Born-digital PDF | Reading order, headings, bold text, page markers, and detected table layout |
-| CSV | One Markdown table containing the original headers and rows |
-
-Parsing preserves useful structure but does not select retrieval chunks.
-Schedule CSVs have an optional typed-record preview for exact filtering. The
-extra output never enters the chunker. Other CSV schemas still parse to
-Markdown but are not accepted by the schedule preview.
-
-## Stage 2: chunking
-
-The chunking endpoint accepts Markdown text. It does not receive a DOCX, PDF, or CSV file.
-
-The default layout-aware chunker:
-
-- keeps a bold or numbered question with its following answer
-- creates one chunk per Markdown table row while repeating the table header
-- keeps heading context with every chunk
-- tracks PDF page markers when they are available
-- splits long sections using the configured character limit
-- returns deterministic chunk identifiers and source metadata
-- records table row numbers and links parts of a long section with `unit_id`
-
-For a chunking comparison, select `fixed_size` (simple size baseline),
-`layout_aware` (the default), `hybrid` (layout-aware with overlap in long
-narrative sections), or `paragraph_aware` (ordinary narrative paragraphs as
-separate units). `overlap_chars` only affects `hybrid` and must be no more
-than one quarter of `max_chars`. Table rows stay together in layout-aware and
-hybrid modes. When a row exceeds the size limit, the response includes an
-`oversized_unit` warning; it does not silently break a record. Hybrid repeats
-only complete trailing sentences that fit within the overlap budget.
-
-CSV normalization preserves extra columns in uneven rows, adds neutral labels
-for missing headers, and warns about them. Ordinary prose remains prose without
-invented questions. Review inferred PDF table layouts against the source pages.
-
-The choice is a candidate for retrieval experiments, not a measured retrieval
-recommendation yet. The default `max_chars` is a character count, not tokens.
-
-## Run the demo
-
-Python 3.11 or later is required.
+macOS/Linux:
 
 ```bash
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# macOS or Linux
-source .venv/bin/activate
-
-pip install -e .
-gsme-rag-api
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m gsme_rag.api.run
 ```
 
-Create the virtual environment only once in a fresh project folder. If your
-prompt already starts with `(.venv)`, use that environment and skip the
-`python -m venv .venv` step. Check `pyproject.toml` in the extracted folder:
-the current lab is version `0.7.0` and contains a `tests` directory.
+## Demo walk-through
 
-Open:
+1. Upload the bold-question FAQ DOCX, parse, then click **Chunk Markdown** with Automatic. Expect 31 FAQ pair chunks.
+2. Upload the FAQ-table PDF and repeat. Expect 31 table-row chunks with header and page metadata.
+3. Upload the life-story DOCX. Expect eight paragraph chunks, with rhetorical questions retained as prose.
+4. Upload a Full or Shared schedule CSV. The parsed Markdown remains visible. Click **Preview schedule records** in section 3 and filter by fields and dates. Section 2 returns no schedule chunks by default. Check **Also create semantic discovery chunks** to inspect a row-per-chunk projection if wanted.
+5. Upload `no name in file.csv` without choosing a schedule type. Parse metadata reads `needs_schedule_kind`, and section 2 is blocked. Choose **Shared schedules**, parse again and inspect both the row labels and source metadata.
 
-```text
-http://localhost:8000
-```
+## API contract
 
-The browser demonstrates the boundary directly:
+- `POST /v1/parse` accepts multipart `file` and optional `schedule_kind=auto|full|shared`. It returns Markdown, warnings and document metadata with SHA-256 source and normalized text hashes. Generic schedule names require an explicit label for downstream use.
+- `POST /v1/chunk` accepts Markdown, optional parse `metadata`, `strategy=auto` by default, `max_chars`, `overlap_chars`, and `semantic_schedule_rows=false`. Each chunk has an explicit `category`, source ID, normalized hash, retrieval channel, route reason, type, heading path, page range, row number and part indexes. Sibling PDF categories replace one another; a wrapped bold question stays paired with its answer. Pass the entire `metadata` object from the parse response. Edited Markdown receives a warning and its own normalized hash.
+- `POST /v1/schedules/preview` accepts a schedule CSV and optional `schedule_kind`; exact filters are `technology_nm`, `flavor` and `tapeout_on_or_after`. It returns typed records with row provenance and deterministic IDs. Generic schedule names without a label return HTTP 422.
+- `GET /v1/health` returns `{"status":"ok"}`.
 
-1. Upload a source file
-2. Parse it to Markdown
-3. Inspect or edit the Markdown
-4. Send the Markdown to the separate chunking endpoint
-5. Inspect the returned chunks
+An upload is limited to 20 MiB. Source files are temporarily written and deleted after each request; the app does not persist response metadata. Character limits are not token limits. An oversized table row remains intact with an `oversized_unit` warning. Review inferred PDF tables against the original.
 
-Change the strategy and run step 4 again on the same Markdown to compare
-boundaries. An ordinary narrative example is in `examples/narrative.md`.
+## Publish on Render
 
-The browser also compares all four strategies and can check one question
-against an exact evidence excerpt. Leave the question and excerpt blank to
-compare chunk sizes and warnings alone.
+`render.yaml` and `.python-version` are included. Push the project folder to your GitHub branch, then in Render choose **New > Blueprint** and select that repository/branch. If the repository root has this `render.yaml`, Render uses its build and start commands. Alternatively make a **Web Service** with Python 3, build `pip install .`, start `python -m gsme_rag.api.run`, and health path `/v1/health`. It binds `0.0.0.0` and the Render `PORT`. Open the provided `https://…onrender.com/` URL; `localhost` works only on your machine. See [deployment instructions](docs/DEPLOYMENT.md).
 
-For schedule CSVs, section 4 previews typed rows independently from Markdown.
-Try technology `28`, flavor `HPC+ RF`, and tapeout on or after `2026-10-01`.
-Several rows may share a technology and flavor but have different dates.
-
-Interactive FastAPI documentation is available at:
-
-```text
-http://localhost:8000/docs
-```
-
-## API
-
-### Parse a file to Markdown
-
-```text
-POST /v1/parse
-```
-
-Multipart form field:
-
-| Field | Required | Value |
-| --- | ---: | --- |
-| `file` | Yes | `.docx`, `.pdf`, or `.csv` |
-
-Example:
-
-```bash
-curl -X POST http://localhost:8000/v1/parse \
-  -F "file=@Muse_FAQs.docx"
-```
-
-Response shape:
-
-```json
-{
-  "filename": "Muse_FAQs.docx",
-  "document_type": "docx",
-  "strategy_used": "docx_structure_to_markdown",
-  "markdown": "# General\n\n**01 What is Muse?**\n\nMuse provides...\n",
-  "markdown_character_count": 68,
-  "warning_count": 0,
-  "warnings": []
-}
-```
-
-### Chunk Markdown
-
-```text
-POST /v1/chunk
-```
-
-JSON body:
-
-```json
-{
-  "source_file": "Muse_FAQs.docx",
-  "markdown": "# General\n\n**01 What is Muse?**\n\nMuse provides...",
-  "max_chars": 1800,
-  "strategy": "layout_aware",
-  "overlap_chars": 120
-}
-```
-
-Response shape:
-
-```json
-{
-  "source_file": "Muse_FAQs.docx",
-  "max_chars": 1800,
-  "strategy": "layout_aware",
-  "overlap_chars": 0,
-  "chunk_count": 1,
-  "warning_count": 0,
-  "chunks": [
-    {
-      "chunk_id": "chunk-123456789abc",
-      "index": 0,
-      "text": "# General\n\n**01 What is Muse?**\n\nMuse provides...",
-      "chunk_type": "question_answer",
-      "source_file": "Muse_FAQs.docx",
-      "heading_path": ["General"],
-      "source_page_start": null,
-      "source_page_end": null,
-      "table_row_number": null,
-      "unit_id": "unit-123456789abc",
-      "part_index": 0,
-      "part_count": 1,
-      "character_count": 59
-    }
-  ],
-  "warnings": []
-}
-```
-
-### Compare strategies
-
-```text
-POST /v1/compare
-```
-
-The JSON body accepts `markdown`, `source_file`, `max_chars`,
-`overlap_chars`, and optional `cases` with `question` and `evidence` fields.
-The report shows chunk sizes, warnings, evidence retention, and a keyword
-ranking probe for the same Markdown. A case absent from the Markdown is
-marked invalid. These are diagnostics, not semantic retrieval results.
-
-### Preview typed schedule rows
-
-```text
-POST /v1/schedules/preview?technology_nm=28&flavor=HPC%2B%20RF&tapeout_on_or_after=2026-10-01
-```
-
-Upload a `.csv` file in the `file` multipart field. The known schema requires
-`technology_nm`, `flavor`, `trial_deadline`, `final_deadline`, `tapeout_date`,
-and `estimated_ship_date`. Dates accept `M/D/YYYY` or `YYYY-MM-DD`; the JSON
-response shows ISO dates, CSV row numbers, total records, and matched records.
-Invalid dates produce row-specific errors. Generic CSV normalization under
-`/v1/parse` remains available for other headers. No database is required.
-
-### Architecture description
-
-```text
-GET /v1/architecture
-```
-
-### Health check
-
-```text
-GET /v1/health
-```
-
-## Command line
-
-Parse a source file to Markdown:
-
-```bash
-gsme-rag parse input.docx --output normalized.md
-```
-
-Chunk the Markdown in a separate command:
-
-```bash
-gsme-rag chunk normalized.md --output chunks.json --max-chars 1800
-```
-
-Repeat with `--strategy fixed_size`, `--strategy paragraph_aware`, and
-`--strategy hybrid --overlap-chars 120`.
-
-Compare all strategies with known evidence:
-
-```bash
-gsme-rag compare examples/narrative.md --cases examples/narrative_cases.json --max-chars 400 --overlap-chars 60 --output narrative_report.json
-```
-
-Read `docs/CHUNKING_STUDY.md` for the evaluation method and
-`docs/TEAM_BRIEF.md` for the weekly update. The example cases demonstrate the
-workflow; replace them with reviewed questions from your documents.
-
-## Test
-
-```bash
-pip install -e .
-python -m unittest discover -s tests -v
-```
-
-The tests cover parsing, chunking, comparison, and direct FastAPI route logic.
-They do not start an HTTP server. Run the browser demo on your machine for the
-final upload and interaction check.
+Use approved or synthetic files for a public demo. The included web app has no login and does not yet implement production controls.

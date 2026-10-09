@@ -9,6 +9,7 @@ import pymupdf as fitz
 from gsme_rag.chunking import chunk_markdown, compare_strategies
 from gsme_rag.parsing import parse_to_markdown
 from gsme_rag.parsing.schedules import filter_schedule_records, parse_schedule_records
+from gsme_rag.parsing.schedules import resolve_schedule_kind
 
 
 class ParsingStageTests(unittest.TestCase):
@@ -121,6 +122,42 @@ class ParsingStageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "row 2: tapeout_date"):
             parse_schedule_records(path)
 
+    def test_generically_named_schedule_requires_explicit_kind_for_context(self) -> None:
+        path = self.root / "no name in file.csv"
+        path.write_text(
+            "technology_nm,flavor,trial_deadline,final_deadline,tapeout_date,estimated_ship_date\n"
+            "28,HPC+ RF,8/26/2026,9/2/2026,9/9/2026,12/17/2026\n",
+            encoding="utf-8",
+        )
+        unknown = parse_to_markdown(path)
+        labeled = parse_to_markdown(path, schedule_kind="shared")
+        self.assertEqual(unknown.warnings[0].code, "schedule_kind_unknown")
+        self.assertTrue(labeled.markdown.startswith("# Shared Schedules"))
+        self.assertEqual(labeled.filename, "no name in file.csv")
+        self.assertEqual(labeled.warnings, [])
+        self.assertEqual(unknown.metadata.classification_status, "needs_schedule_kind")
+        self.assertEqual(labeled.metadata.schedule_kind_source, "user")
+        with self.assertRaisesRegex(ValueError, "Schedule type is unknown"):
+            chunk_markdown(unknown.markdown, path.name, metadata=unknown.metadata)
+        structured_only = chunk_markdown(labeled.markdown, path.name, metadata=labeled.metadata)
+        self.assertEqual(structured_only.chunks, [])
+        self.assertEqual(structured_only.warnings[0].code, "structured_records_only")
+        discovery = chunk_markdown(
+            labeled.markdown, path.name, metadata=labeled.metadata,
+            semantic_schedule_rows=True,
+        )
+        self.assertEqual(len(discovery.chunks), 1)
+        self.assertEqual(discovery.chunks[0].schedule_kind, "shared")
+        self.assertEqual(discovery.chunks[0].source_row_number, 2)
+        self.assertEqual(discovery.chunks[0].source_id, labeled.metadata.source_id)
+        with self.assertRaisesRegex(ValueError, "row-preserving"):
+            chunk_markdown(
+                labeled.markdown, path.name, strategy="fixed_size",
+                metadata=labeled.metadata, semantic_schedule_rows=True,
+            )
+        with self.assertRaisesRegex(ValueError, "filename says full schedules"):
+            resolve_schedule_kind("full_schedules.csv", "shared")
+
     def test_adjacent_italic_runs_are_one_markdown_span(self) -> None:
         path = self.root / "story.docx"
         document = Document()
@@ -151,6 +188,28 @@ class ParsingStageTests(unittest.TestCase):
         self.assertIn("<!-- page: 1 -->", result.markdown)
         self.assertIn("**01 What is Muse?**", result.markdown)
 
+    def test_pdf_equal_size_category_headings_are_siblings(self) -> None:
+        path = self.root / "faqs.pdf"
+        document = fitz.open()
+        for category, question, answer in [
+            ("General", "01 Who do I contact?", "Email support."),
+            ("TapeOut Services", "01 What is the minimum area?", "It depends."),
+        ]:
+            page = document.new_page(width=612, height=792)
+            page.insert_text((50, 70), category, fontname="hebo", fontsize=15)
+            page.insert_text((50, 105), question, fontname="hebo", fontsize=11)
+            page.insert_text((50, 130), answer, fontname="helv", fontsize=11)
+        document.save(path)
+        document.close()
+
+        parsed = parse_to_markdown(path)
+        self.assertIn("# General", parsed.markdown)
+        self.assertIn("# TapeOut Services", parsed.markdown)
+        self.assertNotIn("## TapeOut Services", parsed.markdown)
+        chunks = chunk_markdown(parsed.markdown, path.name, metadata=parsed.metadata).chunks
+        self.assertEqual([c.category for c in chunks], ["General", "TapeOut Services"])
+        self.assertEqual(chunks[1].heading_path, ["TapeOut Services"])
+
     def test_pdf_without_selectable_text_returns_warning(self) -> None:
         path = self.root / "empty.pdf"
         document = fitz.open()
@@ -165,6 +224,78 @@ class ParsingStageTests(unittest.TestCase):
 
 
 class ChunkingStageTests(unittest.TestCase):
+    def test_pdf_sibling_categories_replace_general_in_chunks(self) -> None:
+        markdown = (
+            "<!-- page: 1 -->\n\n## General\n\n**01 Who do I contact?**\n\nEmail support.\n\n"
+            "<!-- page: 2 -->\n\n## TapeOut Services\n\n**01 What is the minimum area?**\n\n"
+            "It depends on technology.\n\n## Additional Services\n\n"
+            "**01 Can I order more samples?**\n\nYes."
+        )
+        chunks = chunk_markdown(markdown, "faq.pdf").chunks
+        self.assertEqual(
+            [chunk.category for chunk in chunks],
+            ["General", "TapeOut Services", "Additional Services"],
+        )
+        self.assertEqual(chunks[1].heading_path, ["TapeOut Services"])
+        self.assertTrue(chunks[1].text.startswith("# TapeOut Services"))
+        self.assertNotIn("General", chunks[1].text)
+
+    def test_wrapped_bold_pdf_question_is_one_complete_pair(self) -> None:
+        markdown = (
+            "## TapeOut Services\n\n"
+            "**09 Which technologies are supported?**\n\nAll TSMC technologies.\n\n"
+            "**10 Can I access the standard cells and I/O libraries**\n\n"
+            "**through Muse Semiconductor?**\n\nYes, request access by email."
+        )
+        chunks = chunk_markdown(markdown, "faq.pdf").chunks
+        self.assertEqual(len(chunks), 2)
+        self.assertNotIn("10 Can I access", chunks[0].text)
+        self.assertIn(
+            "**10 Can I access the standard cells and I/O libraries through Muse Semiconductor?**",
+            chunks[1].text,
+        )
+        self.assertIn("Yes, request access by email.", chunks[1].text)
+
+    def test_pdf_table_category_column_sets_explicit_category(self) -> None:
+        markdown = (
+            "# FAQ Table\n\n"
+            "| Category | Question | Answer | Page |\n| --- | --- | --- | --- |\n"
+            "| General | Who do I contact? | Email support. | 1 |\n"
+            "| TapeOut Services | What is the minimum area? | It depends. | 2 |"
+        )
+        chunks = chunk_markdown(markdown, "faq.pdf").chunks
+        self.assertEqual([chunk.category for chunk in chunks], ["General", "TapeOut Services"])
+        self.assertEqual(chunks[1].heading_path, ["FAQ Table"])
+        self.assertEqual(chunks[1].source_page_start, 2)
+
+    def test_auto_routes_mixed_document_by_block(self) -> None:
+        markdown = (
+            "# Guide\n\n**What is the deadline?**\n\nThe final review is Friday.\n\n"
+            "| Question | Answer |\n| --- | --- |\n| Who approves? | The lead. |\n\n"
+            "A separate narrative paragraph.\n\nAnother independent observation."
+        )
+        result = chunk_markdown(markdown)
+        self.assertEqual(
+            [chunk.chunk_type for chunk in result.chunks],
+            ["question_answer", "table_row", "section", "section"],
+        )
+        self.assertTrue(all(chunk.strategy_used == "auto" for chunk in result.chunks))
+        self.assertEqual(len({chunk.source_id for chunk in result.chunks}), 1)
+        self.assertEqual(
+            [chunk.chunk_id for chunk in result.chunks],
+            [chunk.chunk_id for chunk in chunk_markdown(markdown).chunks],
+        )
+
+    def test_edited_markdown_changes_hash_and_warns(self) -> None:
+        from gsme_rag.models import DocumentMetadata
+        metadata = DocumentMetadata(
+            source_id="doc-abc", content_sha256="abc", normalized_sha256="old",
+            source_file="note.docx", document_type="docx", document_class="document",
+        )
+        result = chunk_markdown("A revised observation.", source_file="note.docx", metadata=metadata)
+        self.assertEqual(result.warnings[0].code, "markdown_edited")
+        self.assertEqual(result.chunks[0].source_id, "doc-abc")
+
     def test_question_and_answer_stay_in_one_chunk(self) -> None:
         markdown = """# General
 
@@ -212,6 +343,12 @@ Muse provides semiconductor services.
 
         self.assertEqual(result.chunks[0].source_page_start, 3)
         self.assertEqual(result.chunks[0].table_row_number, 2)
+
+    def test_pdf_table_row_page_range_is_preserved(self) -> None:
+        markdown = "# FAQ\n\n| Question | Answer | Page |\n| --- | --- | --- |\n| Why? | A long answer. | 3-4 |"
+        result = chunk_markdown(markdown)
+        self.assertEqual(result.chunks[0].source_page_start, 3)
+        self.assertEqual(result.chunks[0].source_page_end, 4)
 
     def test_generic_pdf_prose_keeps_page_boundaries(self) -> None:
         markdown = "<!-- page: 1 -->\n\n# History\n\nA first-page fact.\n\n<!-- page: 2 -->\n\nA second-page fact."

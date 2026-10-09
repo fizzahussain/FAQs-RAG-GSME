@@ -2,7 +2,8 @@ from dataclasses import dataclass
 import hashlib
 import re
 
-from gsme_rag.models import ChunkResult, MarkdownChunk, ParseWarning
+from gsme_rag.models import ChunkResult, DocumentMetadata, MarkdownChunk, ParseWarning
+from gsme_rag.parsing.schedules import SCHEDULE_COLUMNS, resolve_schedule_kind
 
 
 PAGE_MARKER = re.compile(r"^<!--\s*page:\s*(\d+)\s*-->$")
@@ -32,6 +33,7 @@ class _Unit:
     page_end: int | None
     anchor: str = ""
     table_row_number: int | None = None
+    category: str | None = None
 
 
 def _is_table_start(lines: list[str], index: int) -> bool:
@@ -149,6 +151,54 @@ def _is_question(text: str) -> bool:
     return plain.endswith("?") and (is_bold or bool(NUMBERED_QUESTION.match(plain)))
 
 
+def _is_bold_paragraph(text: str) -> bool:
+    value = text.strip()
+    return (
+        (value.startswith("**") and value.endswith("**"))
+        or (value.startswith("__") and value.endswith("__"))
+    )
+
+
+def _merge_wrapped_questions(blocks: list[_Block]) -> list[_Block]:
+    """Join numbered PDF question lines when the question mark wraps."""
+    merged: list[_Block] = []
+    index = 0
+    while index < len(blocks):
+        block = blocks[index]
+        if (
+            block.kind == "paragraph"
+            and _is_bold_paragraph(block.text)
+            and NUMBERED_QUESTION.match(_plain_text(block.text))
+            and not _plain_text(block.text).endswith("?")
+        ):
+            parts = [_plain_text(block.text)]
+            next_index = index + 1
+            while next_index < len(blocks):
+                following = blocks[next_index]
+                if (
+                    following.kind != "paragraph"
+                    or not _is_bold_paragraph(following.text)
+                    or NUMBERED_QUESTION.match(_plain_text(following.text))
+                ):
+                    break
+                parts.append(_plain_text(following.text))
+                next_index += 1
+                if parts[-1].endswith("?"):
+                    break
+            if len(parts) > 1 and parts[-1].endswith("?"):
+                merged.append(_Block(
+                    kind="paragraph",
+                    text=f"**{' '.join(parts)}**",
+                    page_start=block.page_start,
+                    page_end=blocks[next_index - 1].page_end,
+                ))
+                index = next_index
+                continue
+        merged.append(block)
+        index += 1
+    return merged
+
+
 def _heading_markdown(path: list[str]) -> str:
     return "\n".join(f"{'#' * min(index + 1, 6)} {title}" for index, title in enumerate(path))
 
@@ -249,29 +299,40 @@ def _table_units(block: _Block, heading_path: list[str]) -> list[_Unit]:
         (index for index, value in enumerate(header_cells) if value.strip().casefold() == "page"),
         None,
     )
+    category_column = next(
+        (index for index, value in enumerate(header_cells) if value.strip().casefold() == "category"),
+        None,
+    )
     units = []
     for row_number, row in enumerate(lines[2:], start=block.first_data_row):
         cells = re.split(r"(?<!\\)\|", row.strip().strip("|"))
         page = block.page_start
+        page_end = block.page_end
         if page_column is not None and page_column < len(cells):
             value = cells[page_column].strip()
-            if value.isdecimal():
-                page = int(value)
+            page_range = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", value)
+            if page_range:
+                page = int(page_range.group(1))
+                page_end = int(page_range.group(2) or page_range.group(1))
         units.append(_Unit(
             kind="table_row",
             body=f"{header}\n{row}",
             heading_path=heading_path.copy(),
             page_start=page,
-            page_end=page,
+            page_end=page_end,
             table_row_number=row_number,
+            category=cells[category_column].strip() if category_column is not None and category_column < len(cells) else None,
         ))
     return units
 
 
 def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False) -> list[_Unit]:
     units: list[_Unit] = []
-    heading_path: list[str] = []
+    heading_stack: list[tuple[int, str]] = []
     generic: list[_Block] = []
+
+    def current_path() -> list[str]:
+        return [title for _, title in heading_stack]
 
     def flush_generic() -> None:
         nonlocal generic
@@ -281,7 +342,7 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False) -> li
             _Unit(
                 kind="section",
                 body="\n\n".join(block.text for block in generic),
-                heading_path=heading_path.copy(),
+                heading_path=current_path(),
                 page_start=generic[0].page_start,
                 page_end=generic[-1].page_end,
             )
@@ -294,14 +355,14 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False) -> li
         if block.kind == "heading":
             flush_generic()
             level = block.level or 1
-            heading_path = heading_path[: level - 1]
-            heading_path.append(block.title or block.text)
+            heading_stack = [(depth, title) for depth, title in heading_stack if depth < level]
+            heading_stack.append((level, block.title or block.text))
             index += 1
             continue
 
         if block.kind == "table":
             flush_generic()
-            units.extend(_table_units(block, heading_path))
+            units.extend(_table_units(block, current_path()))
             index += 1
             continue
 
@@ -322,7 +383,7 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False) -> li
                     kind="question_answer",
                     anchor=block.text,
                     body="\n\n".join(item.text for item in answer_blocks),
-                    heading_path=heading_path.copy(),
+                    heading_path=current_path(),
                     page_start=block.page_start,
                     page_end=(answer_blocks[-1].page_end if answer_blocks else block.page_end),
                 )
@@ -343,13 +404,15 @@ def chunk_markdown(
     markdown: str,
     source_file: str = "normalized.md",
     max_chars: int = 1800,
-    strategy: str = "layout_aware",
+    strategy: str = "auto",
     overlap_chars: int = 120,
+    metadata: DocumentMetadata | None = None,
+    semantic_schedule_rows: bool = False,
 ) -> ChunkResult:
     if not 200 <= max_chars <= 20_000:
         raise ValueError("max_chars must be between 200 and 20000")
-    if strategy not in {"fixed_size", "layout_aware", "hybrid", "paragraph_aware"}:
-        raise ValueError("strategy must be fixed_size, layout_aware, hybrid, or paragraph_aware")
+    if strategy not in {"auto", "fixed_size", "layout_aware", "hybrid", "paragraph_aware"}:
+        raise ValueError("strategy must be auto, fixed_size, layout_aware, hybrid, or paragraph_aware")
     if strategy == "hybrid" and not 0 <= overlap_chars <= max_chars // 4:
         raise ValueError("overlap_chars must be between 0 and one quarter of max_chars")
     if not markdown.strip():
@@ -359,6 +422,35 @@ def chunk_markdown(
             ]
         )
 
+    normalized_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+    if metadata and metadata.source_file != source_file:
+        raise ValueError("source_file must match the parse metadata source_file")
+    blocks = _merge_wrapped_questions(_parse_blocks(markdown))
+    schedule_tables = [
+        block for block in blocks if block.kind == "table"
+        and set(SCHEDULE_COLUMNS).issubset(
+            {cell.strip() for cell in block.text.splitlines()[0].strip("|").split("|")}
+        )
+    ]
+    is_schedule = bool(schedule_tables) or bool(metadata and metadata.document_class == "schedule")
+    kind = metadata.schedule_kind if metadata else None
+    if is_schedule and not kind:
+        kind = resolve_schedule_kind(source_file)
+    if is_schedule and kind:
+        resolve_schedule_kind(source_file, kind)  # reject conflicting filename metadata
+    if is_schedule and not kind:
+        raise ValueError("Schedule type is unknown. Select Full or Shared before chunking or ingesting.")
+    if metadata and metadata.classification_status != "ready" and is_schedule:
+        # A newer explicit selection must come through a new parse request.
+        raise ValueError("Schedule metadata needs review. Reparse with Full or Shared selected.")
+    if is_schedule and not semantic_schedule_rows:
+        return ChunkResult(warnings=[ParseWarning(
+            code="structured_records_only",
+            message="Schedule rows are typed records for exact filtering. Enable semantic schedule rows to create optional discovery chunks.",
+        )])
+    if is_schedule and strategy == "fixed_size":
+        raise ValueError("Fixed-size chunking is a comparison baseline; schedule discovery requires row-preserving chunking.")
+
     if strategy == "fixed_size":
         units = [
             _Unit("fixed_size", part, [], None, None)
@@ -366,10 +458,15 @@ def chunk_markdown(
         ]
     else:
         units = _blocks_to_units(
-            _parse_blocks(markdown), split_paragraphs=strategy == "paragraph_aware"
+            blocks, split_paragraphs=strategy in {"auto", "paragraph_aware"}
         )
     chunks: list[MarkdownChunk] = []
     warnings: list[ParseWarning] = []
+    if metadata and normalized_hash != metadata.normalized_sha256:
+        warnings.append(ParseWarning(
+            code="markdown_edited",
+            message="Markdown changed after parsing; the chunk hash identifies this edited version.",
+        ))
 
     for unit_index, unit in enumerate(units):
         context = _heading_markdown(unit.heading_path)
@@ -381,7 +478,7 @@ def chunk_markdown(
             # A row is one record; cutting it can detach values from column names.
             body_parts = [unit.body]
         elif unit.body:
-            use_overlap = strategy == "hybrid" and unit.kind == "section"
+            use_overlap = strategy in {"auto", "hybrid"} and unit.kind == "section" and len(unit.body) > body_limit
             effective_overlap = min(overlap_chars, body_limit // 4) if use_overlap else 0
             part_limit = body_limit - effective_overlap
             body_parts = _split_text(unit.body, part_limit)
@@ -390,9 +487,10 @@ def chunk_markdown(
         else:
             body_parts = [""]
 
-        unit_digest = hashlib.sha1(
-            f"{source_file}|{unit_index}|{unit.kind}|{unit.body}".encode("utf-8")
-        ).hexdigest()[:12]
+        source_id = metadata.source_id if metadata else f"md-{normalized_hash[:16]}"
+        unit_digest = hashlib.sha256(
+            f"{source_id}|{normalized_hash}|{unit_index}|{unit.kind}|{unit.body}".encode("utf-8")
+        ).hexdigest()[:16]
         for part_index, body in enumerate(body_parts):
             text = "\n\n".join(part for part in (fixed, body) if part).strip()
             if not text:
@@ -409,9 +507,22 @@ def chunk_markdown(
                     )
                 )
             index = len(chunks)
-            digest = hashlib.sha1(
-                f"{source_file}|{index}|{text}".encode("utf-8")
-            ).hexdigest()[:12]
+            digest = hashlib.sha256(
+                f"{source_id}|{normalized_hash}|{strategy}|{index}|{text}".encode("utf-8")
+            ).hexdigest()[:16]
+            if unit.kind == "question_answer":
+                reason = "bold or numbered question paired with following answer"
+            elif unit.kind == "table_row":
+                reason = "table row kept with column headers"
+            elif strategy == "auto":
+                reason = (
+                    "long prose split at sentence boundaries with overlap"
+                    if len(body_parts) > 1 else "prose paragraph within section"
+                )
+            elif strategy == "fixed_size":
+                reason = "size baseline"
+            else:
+                reason = f"{strategy} selection"
             chunks.append(
                 MarkdownChunk(
                     chunk_id=f"chunk-{digest}",
@@ -420,12 +531,23 @@ def chunk_markdown(
                     chunk_type=unit.kind,
                     source_file=source_file,
                     heading_path=unit.heading_path.copy(),
+                    category=unit.category or (unit.heading_path[-1] if unit.heading_path else None),
                     source_page_start=unit.page_start,
                     source_page_end=unit.page_end,
                     table_row_number=unit.table_row_number,
                     unit_id=f"unit-{unit_digest}",
                     part_index=part_index,
                     part_count=len(body_parts),
+                    source_id=source_id,
+                    normalized_sha256=normalized_hash,
+                    document_type=metadata.document_type if metadata else "markdown",
+                    document_class=metadata.document_class if metadata else ("schedule" if is_schedule else "document"),
+                    schedule_kind=kind,
+                    schedule_kind_source=metadata.schedule_kind_source if metadata else ("filename" if kind else None),
+                    retrieval_channel="semantic",
+                    strategy_used=strategy,
+                    routing_reason=reason,
+                    source_row_number=unit.table_row_number if is_schedule else None,
                 )
             )
 

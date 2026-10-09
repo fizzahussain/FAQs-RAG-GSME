@@ -11,6 +11,20 @@ class ParseWarningOut(BaseModel):
     location: str | None = None
 
 
+class DocumentMetadataOut(BaseModel):
+    source_id: str
+    content_sha256: str
+    normalized_sha256: str
+    source_file: str
+    document_type: str
+    document_class: str
+    schedule_kind: Literal["full", "shared"] | None = None
+    schedule_kind_source: str | None = None
+    classification_status: str
+    schema_version: str
+    parser_version: str
+
+
 class ParseResponse(BaseModel):
     filename: str
     document_type: str
@@ -19,31 +33,46 @@ class ParseResponse(BaseModel):
     markdown_character_count: int = Field(ge=0)
     warning_count: int = Field(ge=0)
     warnings: list[ParseWarningOut]
+    metadata: DocumentMetadataOut
 
 
 class ScheduleRecordOut(BaseModel):
     source_row_number: int
+    schedule_kind: Literal["full", "shared"] | None
     technology_nm: int
     flavor: str
     trial_deadline: date
     final_deadline: date
     tapeout_date: date
     estimated_ship_date: date
+    source_id: str = ""
+    record_id: str = ""
+    source_file: str = ""
+    schedule_kind_source: str | None = None
+    retrieval_channel: Literal["structured"] = "structured"
+    schema_version: str = "1"
 
 
 class SchedulePreviewResponse(BaseModel):
     source_file: str
+    schedule_kind: Literal["full", "shared"] | None
     total_records: int
     matched_records: int
     records: list[ScheduleRecordOut]
+    warnings: list[ParseWarningOut]
+    source_id: str = ""
+    classification_status: str = "ready"
+    retrieval_channel: Literal["structured"] = "structured"
 
 
 class ChunkRequest(BaseModel):
     markdown: str
     source_file: str = "normalized.md"
     max_chars: int = Field(default=1800, ge=200, le=20_000)
-    strategy: Literal["fixed_size", "layout_aware", "hybrid", "paragraph_aware"] = "layout_aware"
+    strategy: Literal["auto", "fixed_size", "layout_aware", "hybrid", "paragraph_aware"] = "auto"
     overlap_chars: int = Field(default=120, ge=0)
+    metadata: DocumentMetadataOut | None = None
+    semantic_schedule_rows: bool = False
 
 
 class MarkdownChunkOut(BaseModel):
@@ -53,6 +82,7 @@ class MarkdownChunkOut(BaseModel):
     chunk_type: str
     source_file: str
     heading_path: list[str]
+    category: str | None = None
     source_page_start: int | None = None
     source_page_end: int | None = None
     table_row_number: int | None = None
@@ -60,6 +90,17 @@ class MarkdownChunkOut(BaseModel):
     part_index: int = Field(ge=0)
     part_count: int = Field(ge=1)
     character_count: int = Field(ge=0)
+    source_id: str
+    normalized_sha256: str
+    document_type: str
+    document_class: str
+    schedule_kind: Literal["full", "shared"] | None = None
+    schedule_kind_source: str | None = None
+    retrieval_channel: Literal["semantic"]
+    strategy_used: str
+    routing_reason: str
+    schema_version: str
+    source_row_number: int | None = None
 
 
 class ChunkResponse(BaseModel):
@@ -71,6 +112,8 @@ class ChunkResponse(BaseModel):
     warning_count: int = Field(ge=0)
     chunks: list[MarkdownChunkOut]
     warnings: list[ParseWarningOut]
+    retrieval_channel: Literal["semantic"] = "semantic"
+    source_id: str = ""
 
 
 class EvidenceCase(BaseModel):

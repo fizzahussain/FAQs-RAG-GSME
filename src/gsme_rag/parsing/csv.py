@@ -2,12 +2,14 @@ import csv
 from pathlib import Path
 
 from gsme_rag.parsing.markdown import finish_markdown, render_markdown_table
+from gsme_rag.parsing.schedules import SCHEDULE_COLUMNS, resolve_schedule_kind
 from gsme_rag.models import ParseWarning, ParsedDocument
 
 
 def parse_csv_to_markdown(
     path: str | Path,
     source_name: str | None = None,
+    schedule_kind: str | None = None,
 ) -> ParsedDocument:
     input_path = Path(path)
     display_name = source_name or input_path.name
@@ -55,7 +57,18 @@ def parse_csv_to_markdown(
                 )
             )
 
-    title = Path(display_name).stem.replace("_", " ").replace("-", " ").strip().title()
+    kind = resolve_schedule_kind(display_name, schedule_kind)
+    if kind is None and set(SCHEDULE_COLUMNS).issubset(normalized_rows[0]):
+        warnings.append(
+            ParseWarning(
+                code="schedule_kind_unknown",
+                message="Select Full or Shared schedule for a generically named schedule CSV",
+            )
+        )
+    title = (
+        f"{kind.title()} Schedules"
+        if kind else Path(display_name).stem.replace("_", " ").replace("-", " ").strip().title()
+    )
     markdown = finish_markdown(
         [
             f"# {title or 'CSV Data'}",
