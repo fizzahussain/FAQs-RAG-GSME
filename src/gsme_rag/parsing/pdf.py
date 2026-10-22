@@ -669,6 +669,32 @@ def _recover_sparse_docling_pages(converted: ParsedDocument, lines: list[_Line])
     return converted
 
 
+def _insert_image_ocr_at_figure(segment: str, value: str) -> str:
+    """Insert image OCR after its caption, before later section headings."""
+    block = (
+        "<!-- review-required: pdf-image-ocr -->\n\n"
+        f"Image text (OCR): {value}\n\n<!-- review-end -->"
+    )
+    lines = segment.splitlines()
+    caption_index = next(
+        (index for index, line in enumerate(lines)
+         if re.match(r"^\s*(?:Figure|Fig\.?|Chart)\s+\d+\b", _plain_markdown_line(line), re.I)),
+        None,
+    )
+    if caption_index is None:
+        return segment.rstrip() + "\n\n" + block
+    insert_at = caption_index + 1
+    # Keep a caption's existing review wrapper intact, then place OCR before
+    # the next heading or prose block.
+    while insert_at < len(lines) and lines[insert_at].strip().startswith("<!--"):
+        if lines[insert_at].strip() == "<!-- review-end -->":
+            insert_at += 1
+            break
+        insert_at += 1
+    lines[insert_at:insert_at] = ["", block, ""]
+    return "\n".join(lines)
+
+
 def _supplement_image_ocr(document: fitz.Document, converted: ParsedDocument,
                           lines: list[_Line]) -> ParsedDocument:
     """Read large raster images when a layout backend kept their page but missed their text."""
@@ -822,7 +848,7 @@ def _supplement_image_ocr(document: fitz.Document, converted: ParsedDocument,
             else:
                 segment += f"\n\n{recovery}"
         for value in additions.get(page_number, []):
-            segment += f"\n\n<!-- review-required: pdf-image-ocr -->\n\nImage text (OCR): {value}\n\n<!-- review-end -->"
+            segment = _insert_image_ocr_at_figure(segment, value)
         if (page_number in visual_gap_pages
                 and f"Visual evidence on page {page_number}" not in segment):
             segment += (

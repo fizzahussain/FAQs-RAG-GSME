@@ -210,6 +210,7 @@ def parse_docling_pdf(path: Path, source_name: str) -> ParsedDocument:
     document = conversion.document
     with fitz.open(path) as source:
         page_count = len(source)
+        page_text = {index: page.get_text("text") for index, page in enumerate(source, start=1)}
         review_pages = {
             index for index, page in enumerate(source, start=1)
             if len(page.get_text("text").strip()) < 90 and page.get_images()
@@ -229,6 +230,11 @@ def parse_docling_pdf(path: Path, source_name: str) -> ParsedDocument:
             if fitz.Rect(info["bbox"]).get_area() >= page_area * .02
             and digest_counts[info.get("digest")] <= max(2, page_count // 20)
         }
+        # A selectable formula or chart label is still unsafe when it shares a
+        # page with visual evidence: symbol fidelity and spatial relationships
+        # are not verified by text extraction alone. Keep this page-level state
+        # distinct from ordinary image pages so surrounding prose on page 2
+        # remains trusted.
     for item, _ in document.iterate_items():
         label = str(getattr(getattr(item, "label", ""), "value", getattr(item, "label", ""))).lower()
         provenance = getattr(item, "prov", None) or []
@@ -238,7 +244,21 @@ def parse_docling_pdf(path: Path, source_name: str) -> ParsedDocument:
         caption = normalize_inline(item.caption_text(document))
         if caption:
             visual_review_pages.add(page)
-    result = _normalize_document(document, source_name, review_pages, visual_review_pages)
+    visual_review_pages_with_numeric_evidence = {
+        page_number
+        for page_number, text in page_text.items()
+        if page_number in visual_review_pages
+        and (
+            len(re.findall(r"\b\d+(?:\.\d+)?(?:%|\s+percent\b)", text, re.I)) >= 2
+            or "=" in text
+        )
+    }
+    result = _normalize_document(
+        document,
+        source_name,
+        review_pages | visual_review_pages_with_numeric_evidence,
+        visual_review_pages,
+    )
     for page in review_pages:
         match = re.search(
             rf"<!-- page: {page} -->(.*?)(?=<!-- page: \d+ -->|\Z)",

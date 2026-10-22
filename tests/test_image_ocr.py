@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from docx import Document
@@ -12,7 +13,8 @@ import pymupdf
 from gsme_rag.chunking import chunk_markdown, chunk_faqs, chunk_papers
 from gsme_rag.models import ParsedDocument
 from gsme_rag.parsing import parse_to_markdown
-from gsme_rag.parsing.pdf import _Line, _supplement_image_ocr
+from gsme_rag.parsing.docling_pdf import _normalize_document
+from gsme_rag.parsing.pdf import _Line, _insert_image_ocr_at_figure, _supplement_image_ocr
 
 
 def sample_image() -> bytes:
@@ -25,6 +27,36 @@ def sample_image() -> bytes:
 
 
 class ImageOcrTests(unittest.TestCase):
+    def test_image_ocr_is_inserted_after_figure_before_later_heading(self):
+        markdown = (
+            "<!-- page: 2 -->\n\nFigure 1. Raster evidence\n\n"
+            "## 2.1 Expected behavior\n\nLater prose."
+        )
+        result = _insert_image_ocr_at_figure(markdown, "LOT A17")
+        self.assertLess(result.index("Image text (OCR): LOT A17"), result.index("## 2.1"))
+        chunks = chunk_markdown(result, "sample.pdf").chunks
+        ocr = next(chunk for chunk in chunks if "LOT A17" in chunk.text)
+        self.assertNotIn("2.1 Expected behavior", ocr.heading_path)
+        self.assertTrue(ocr.review_required)
+
+    def test_numeric_visual_page_keeps_formula_and_chart_review_state(self):
+        def item(label, page, text="", caption=""):
+            return SimpleNamespace(
+                label=label, prov=[SimpleNamespace(page_no=page)], text=text,
+                caption_text=lambda doc: caption,
+            )
+
+        class Document:
+            def iterate_items(self):
+                yield item("section_header", 3, "Charts and formulas need review"), 1
+                yield item("section_header", 3, "3.1 Formula source line"), 1
+                yield item("text", 3, "GDPW = 3.14 x wafer radius"), 1
+                yield item("picture", 3, caption="Figure 2. Synthetic chart"), 1
+
+        parsed = _normalize_document(Document(), "sample.pdf", {3}, {3})
+        result = chunk_markdown(parsed.markdown, parsed.filename)
+        self.assertTrue(all(chunk.review_required for chunk in result.chunks if chunk.source_page_start == 3))
+
     def test_faq_and_paper_have_separate_automatic_routes(self):
         faq = "# General\n\n**What is the pitch?**\n\nIt is 0.127 mm."
         paper = "# Measurements\n\n**Why is the pitch different?**\n\nA paper studies its variation."
