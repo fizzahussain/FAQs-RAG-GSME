@@ -1,4 +1,5 @@
 from datetime import date
+
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -67,13 +68,7 @@ class ChunkRequest(BaseModel):
     markdown: str
     source_file: str = "normalized.md"
     max_chars: int = Field(default=1800, ge=200, le=20_000)
-    strategy: Literal[
-        "auto",
-        "fixed_size",
-        "layout_aware",
-        "hybrid",
-        "paragraph_aware",
-    ] = "auto"
+    strategy: Literal["auto", "fixed_size", "layout_aware", "hybrid", "paragraph_aware"] = "auto"
     overlap_chars: int = Field(default=120, ge=0)
     metadata: DocumentMetadataOut | None = None
     semantic_schedule_rows: bool = False
@@ -97,12 +92,14 @@ class MarkdownChunkOut(BaseModel):
     source_id: str
     schedule_kind: Literal["full", "shared"] | None = None
     source_row_number: int | None = None
+    review_required: bool | None = None
 
 
 class ChunkResponse(BaseModel):
     source_file: str
     max_chars: int
     strategy: str
+    content_route: Literal["faq", "paper", "mixed", "schedule"] | None = None
     overlap_chars: int
     chunk_count: int = Field(ge=0)
     warning_count: int = Field(ge=0)

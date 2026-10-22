@@ -2,7 +2,7 @@ import csv
 from pathlib import Path
 
 from gsme_rag.parsing.markdown import finish_markdown, render_markdown_table
-from gsme_rag.parsing.schedules import is_schedule_header, resolve_schedule_kind
+from gsme_rag.parsing.schedules import is_schedule_header, parse_schedule_records, resolve_schedule_kind
 from gsme_rag.models import ParseWarning, ParsedDocument
 
 
@@ -70,6 +70,9 @@ def parse_csv_to_markdown(
             )
 
     recognized_schedule = is_schedule_header(normalized_rows[0])
+    if recognized_schedule:
+        # Semantic discovery and exact filtering must accept the same schedule rows.
+        parse_schedule_records(input_path)
     if not recognized_schedule and schedule_kind in {"full", "shared"}:
         raise ValueError("The selected schedule type requires the known schedule columns")
     kind = resolve_schedule_kind(display_name, schedule_kind) if recognized_schedule else None

@@ -22,7 +22,7 @@ class DocumentMetadata:
     schedule_kind_source: str | None = None
     classification_status: str = "ready"
     schema_version: str = "3"
-    parser_version: str = "0.10.0"
+    parser_version: str = "0.14.5"
     csv_source_rows: list[int] | None = None
 
 
@@ -38,43 +38,32 @@ class ParsedDocument:
 
 
 def _extract_faq_question(
-    chunk_type: str,
-    text: str,
-    heading_path: list[str],
+    chunk_type: str, text: str, heading_path: list[str]
 ) -> str | None:
-    """Extract a question only from a recognized FAQ chunk."""
+    """Return the source question only for a recognized FAQ chunk."""
     if chunk_type == "table_row":
         match = re.search(
-            r"(?:^|\n)Question:\s*(.*?)\n\nAnswer:",
-            text,
-            flags=re.DOTALL,
+            r"(?:^|\n)Question:\s*(.*?)\n\nAnswer:", text, flags=re.DOTALL
         )
         if not match:
             return None
         question = match.group(1)
-
     elif chunk_type == "question_answer":
         content = text
         if heading_path:
             _, separator, remainder = content.partition("\n\n")
             if separator:
                 content = remainder
-
         question = content.split("\n\n", 1)[0].strip()
-
         if question.startswith("**") and question.endswith("**"):
             question = question[2:-2]
         elif question.startswith("__") and question.endswith("__"):
             question = question[2:-2]
-
         if not question.strip().endswith("?"):
             return None
-
     else:
         return None
-
-    question = re.sub(r"\s+", " ", question).strip()
-    return question or None
+    return re.sub(r"\s+", " ", question).strip() or None
 
 
 @dataclass(slots=True)
@@ -96,13 +85,12 @@ class MarkdownChunk:
     schedule_kind: str | None = None
     source_row_number: int | None = None
     faq_question: str | None = None
+    review_required: bool = False
 
     def __post_init__(self) -> None:
         if self.faq_question is None:
             self.faq_question = _extract_faq_question(
-                self.chunk_type,
-                self.text,
-                self.heading_path,
+                self.chunk_type, self.text, self.heading_path
             )
 
     @property
@@ -136,6 +124,8 @@ def chunk_to_record(chunk: MarkdownChunk) -> dict:
         record["source_row_number"] = chunk.source_row_number
     if chunk.schedule_kind:
         record["schedule_kind"] = chunk.schedule_kind
+    if chunk.review_required:
+        record["review_required"] = True
     if chunk.part_count > 1:
         record.update(
             unit_id=chunk.unit_id,
@@ -149,3 +139,4 @@ def chunk_to_record(chunk: MarkdownChunk) -> dict:
 class ChunkResult:
     chunks: list[MarkdownChunk] = field(default_factory=list)
     warnings: list[ParseWarning] = field(default_factory=list)
+    content_route: str | None = None

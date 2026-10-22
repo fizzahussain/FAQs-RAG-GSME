@@ -4,17 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gsme-rag"
-version = "0.10.0"
+version = "0.14.5"
 description = "Inspectable parsing and chunking lab for the GSME RAG pipeline"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "python-docx>=1.1.0",
-    "PyMuPDF>=1.24.0",
+    "PyMuPDF>=1.24.0,<2",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30.6",
 ]
+
+[project.optional-dependencies]
+pdf = ["docling>=2.50,<3", "httpx[socks]>=0.27"]
+test = ["httpx2>=0.1.0"]
 
 [project.scripts]
 gsme-rag = "gsme_rag.cli:main"

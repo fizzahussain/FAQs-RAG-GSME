@@ -38,6 +38,15 @@ class ParsingStageTests(unittest.TestCase):
         self.assertIn("**01 What is Muse?**", result.markdown)
         self.assertNotIn("chunk_id", result.markdown)
 
+    def test_docx_reports_irrecoverable_replacement_characters(self) -> None:
+        path = self.root / "damaged-text.docx"
+        document = Document()
+        document.add_paragraph("Cost-effective\ufffdand responsive support.")
+        document.save(path)
+        result = parse_to_markdown(path)
+        self.assertIn("\ufffd", result.markdown)
+        self.assertIn("source_replacement_character", [warning.code for warning in result.warnings])
+
     def test_docx_table_becomes_markdown_table(self) -> None:
         path = self.root / "faqs.docx"
         document = Document()
@@ -329,6 +338,20 @@ class ChunkingStageTests(unittest.TestCase):
         )
         self.assertIn("Yes, request access by email.", chunks[1].text)
 
+    def test_faq_answer_continues_across_one_page_after_complete_sentence(self) -> None:
+        markdown = (
+            "<!-- page: 3 -->\n\n# Additional Services\n\n"
+            "**04 Can I choose the wafer thickness?**\n\n"
+            "Yes, supported thicknesses vary.\n\nPlease note the process constraint.\n\n"
+            "<!-- page: 4 -->\n\nThe thinner option adds seven days.\n\n"
+            "**05 Can I receive a whole wafer?**\n\nYes."
+        )
+        result = chunk_markdown(markdown)
+        self.assertEqual(len(result.chunks), 2)
+        self.assertIn("adds seven days", result.chunks[0].text)
+        self.assertEqual(result.chunks[0].source_page_start, 3)
+        self.assertEqual(result.chunks[0].source_page_end, 4)
+
     def test_pdf_table_category_column_sets_explicit_category(self) -> None:
         markdown = (
             "# FAQ Table\n\n"
@@ -389,6 +412,42 @@ Muse provides semiconductor services.
         self.assertIn("semiconductor services", result.chunks[0].text)
         self.assertEqual(result.chunks[0].heading_path, ["General"])
 
+    def test_plain_website_number_and_question_pairs_route_as_faq(self) -> None:
+        markdown = (
+            "General\n\n01\n\nWho do I contact?\n\nEmail support.\n\n"
+            "02\n\nWhat agreement is required?\n\nAn MNDA.\n\n"
+            "TapeOut Services\n\n01\n\nWhat is the minimum area?\n\nIt varies."
+        )
+        result = chunk_markdown(markdown)
+        self.assertEqual(result.content_route, "faq")
+        self.assertEqual(len(result.chunks), 3)
+        self.assertTrue(all(chunk.chunk_type == "question_answer" for chunk in result.chunks))
+        self.assertEqual(result.chunks[0].category, "General")
+        self.assertEqual(result.chunks[-1].category, "TapeOut Services")
+
+    def test_sparse_questions_in_long_manual_do_not_select_faq_route(self) -> None:
+        pages = []
+        for page in range(1, 21):
+            text = "**What is bonding wire?**" if page == 10 else "Manufacturing process evidence."
+            pages.append(f"<!-- page: {page} -->\n\n{text}")
+        result = chunk_markdown("\n\n".join(pages))
+        self.assertEqual(result.content_route, "paper")
+        self.assertFalse(any(chunk.chunk_type == "question_answer" for chunk in result.chunks))
+
+    def test_faq_table_category_rows_set_context_without_becoming_chunks(self) -> None:
+        markdown = (
+            "| Question | Answer |\n| --- | --- |\n"
+            "| General | General |\n"
+            "| Who approves? | The lead. |\n"
+            "| TapeOut | TapeOut |\n"
+            "| When is final review? | Friday. |"
+        )
+        result = chunk_markdown(markdown)
+        self.assertEqual(len(result.chunks), 2)
+        self.assertEqual([chunk.category for chunk in result.chunks], ["General", "TapeOut"])
+        self.assertEqual([chunk.faq_question for chunk in result.chunks],
+                         ["Who approves?", "When is final review?"])
+
     def test_markdown_table_creates_one_chunk_per_data_row(self) -> None:
         markdown = """# Shared Schedules
 
@@ -404,15 +463,15 @@ Muse provides semiconductor services.
         self.assertTrue(all(chunk.chunk_type == "table_row" for chunk in result.chunks))
         self.assertTrue(all("| Tech | Flavor |" in chunk.text for chunk in result.chunks))
 
-    def test_long_table_row_is_not_split_from_its_header(self) -> None:
+    def test_long_table_row_splits_with_labeled_field_context(self) -> None:
         markdown = "# Measurements\n\n| Device | Value |\n| --- | --- |\n"
         markdown += f"| Device A | {'Long value ' * 40}|\n"
         result = chunk_markdown(markdown, max_chars=200)
 
-        self.assertEqual(len(result.chunks), 1)
-        self.assertIn("| Device | Value |", result.chunks[0].text)
-        self.assertIn("Device A", result.chunks[0].text)
-        self.assertEqual(result.warnings[0].code, "oversized_unit")
+        self.assertGreater(len(result.chunks), 1)
+        self.assertTrue(all(len(chunk.text) <= 200 for chunk in result.chunks))
+        self.assertTrue(all("Device: Device A" in chunk.text for chunk in result.chunks))
+        self.assertNotIn("oversized_unit", [warning.code for warning in result.warnings])
 
     def test_long_faq_table_answer_splits_with_question_and_row_identity(self) -> None:
         markdown = "| Question | Answer |\n| --- | --- |\n"

@@ -51,6 +51,12 @@ def resolve_schedule_kind(filename: str, selected: str | None = None) -> str | N
     if selected not in {None, "auto", "full", "shared"}:
         raise ValueError("schedule_kind must be auto, full, or shared")
     name = Path(filename).stem.casefold()
+    labels = {
+        kind for kind in ("shared", "full")
+        if re.search(rf"(?<![a-z]){kind}(?![a-z])", name)
+    }
+    if len(labels) > 1:
+        raise ValueError("filename contains both Full and Shared; rename it unambiguously")
     for kind in ("shared", "full"):
         if re.search(rf"(?<![a-z]){kind}(?![a-z])", name):
             if selected in {"full", "shared"} and selected != kind:

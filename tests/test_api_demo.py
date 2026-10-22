@@ -22,7 +22,8 @@ class APIDemoTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
 
     async def test_health_and_registered_routes(self) -> None:
-        self.assertEqual(await routes.health(), {"status": "ok"})
+        self.assertEqual((await routes.health())["status"], "ok")
+        self.assertIsInstance((await routes.health())["ocr_available"], bool)
         paths = create_app().openapi()["paths"]
         self.assertIn("/v1/parse", paths)
         self.assertIn("/v1/chunk", paths)
@@ -63,6 +64,16 @@ class APIDemoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks.chunks[0].chunk_type, "question_answer")
         self.assertEqual(report["valid_case_count"], 1)
         self.assertEqual(len(report["strategies"]), 4)
+
+    async def test_chunk_response_exposes_review_status_only_when_needed(self) -> None:
+        markdown = (
+            "<!-- page: 1 -->\n\n<!-- review-required: ocr -->\n\n"
+            "OCR 0.127 mm\n\n<!-- review-end -->\n\n"
+            "<!-- page: 2 -->\n\nVerified specification."
+        )
+        result = await routes.chunk_preview(ChunkRequest(markdown=markdown, source_file="manual.pdf"))
+        self.assertTrue(result.chunks[0].model_dump(exclude_none=True)["review_required"])
+        self.assertNotIn("review_required", result.chunks[1].model_dump(exclude_none=True))
 
     async def test_chunk_response_exposes_pdf_category_without_general_parent(self) -> None:
         markdown = (
@@ -169,6 +180,15 @@ class APIDemoTests(unittest.IsolatedAsyncioTestCase):
             await routes.parse_preview(upload)
 
         self.assertEqual(failure.exception.status_code, 415)
+
+    async def test_corrupt_pdf_is_a_client_error(self) -> None:
+        upload = UploadFile(file=BytesIO(b"not a PDF"), filename="manual.pdf")
+        async def read(size: int = -1) -> bytes:
+            return upload.file.read(size)
+        upload.read = read
+        with self.assertRaises(HTTPException) as failure:
+            await routes.parse_preview(upload)
+        self.assertEqual(failure.exception.status_code, 422)
 
 
 if __name__ == "__main__":

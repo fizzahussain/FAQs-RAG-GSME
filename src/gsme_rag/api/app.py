@@ -7,9 +7,9 @@ from gsme_rag.api.routes import router
 def create_app() -> FastAPI:
     app = FastAPI(
         title="GSME RAG Pipeline Demo",
-        version="0.10.0",
+        version="0.14.5",
         description=(
-            "Stage 1 normalizes DOCX, born-digital PDF, or CSV input to Markdown. "
+            "Stage 1 normalizes DOCX, PDF, CSV, or image input to Markdown. "
             "Stage 2 routes semantic Markdown units automatically. Schedule CSVs "
             "produce typed records for exact filtering; their semantic rows are optional."
         ),
@@ -50,8 +50,9 @@ DEMO_PAGE = """
 
   <section>
     <h2>1. Parse file to Markdown</h2>
-    <label for="file">DOCX, digital PDF, or CSV</label>
-    <input id="file" type="file" accept=".docx,.pdf,.csv">
+    <p id="ocr-status" class="note">Checking whether OCR is installed on this server...</p>
+    <label for="file">DOCX, PDF, CSV, or image (PNG, JPEG, TIFF, BMP)</label>
+    <input id="file" type="file" accept=".docx,.pdf,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp">
     <label for="schedule-kind">Schedule type (CSV only)</label>
     <select id="schedule-kind">
       <option value="auto">Use filename</option>
@@ -115,6 +116,13 @@ DEMO_PAGE = """
     const scheduleOutput = document.getElementById('schedule-output');
     let sourceFile = 'normalized.md';
     let documentMetadata = null;
+    fetch('/v1/health').then(response => response.json()).then(result => {
+      document.getElementById('ocr-status').textContent = result.ocr_available
+        ? 'Image OCR is available on this server. Check recognized numbers and tables against the source.'
+        : 'Image OCR is unavailable on this server. Install Tesseract or use the Docker deployment.';
+    }).catch(() => {
+      document.getElementById('ocr-status').textContent = 'Could not check OCR availability.';
+    });
 
     fileInput.addEventListener('change', () => {
       document.getElementById('schedule-kind').value = 'auto';

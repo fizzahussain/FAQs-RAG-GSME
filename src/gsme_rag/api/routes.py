@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import asdict
 import hashlib
 from pathlib import Path
+import shutil
 import tempfile
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
@@ -30,7 +31,7 @@ from gsme_rag.parsing.schedules import (
 
 router = APIRouter(prefix="/v1")
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
-ALLOWED_SUFFIXES = {".docx", ".pdf", ".csv"}
+ALLOWED_SUFFIXES = {".docx", ".pdf", ".csv", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 
 
 async def _save_upload(upload: UploadFile) -> tuple[Path, str, str]:
@@ -39,7 +40,7 @@ async def _save_upload(upload: UploadFile) -> tuple[Path, str, str]:
     if suffix not in ALLOWED_SUFFIXES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Supported files are DOCX, born-digital PDF, and CSV",
+            detail="Supported files are DOCX, PDF, CSV, PNG, JPEG, TIFF, and BMP",
         )
 
     total = 0
@@ -58,8 +59,8 @@ async def _save_upload(upload: UploadFile) -> tuple[Path, str, str]:
 
 
 @router.get("/health", summary="Check that the demo API is running")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, str | bool]:
+    return {"status": "ok", "ocr_available": shutil.which("tesseract") is not None}
 
 
 @router.get("/architecture", summary="Show the separated processing stages")
@@ -67,7 +68,7 @@ async def architecture() -> dict:
     return {
         "stage_1": {
             "name": "parser",
-            "input": ["DOCX", "born-digital PDF", "CSV"],
+            "input": ["DOCX", "PDF", "CSV", "PNG/JPEG/TIFF/BMP images"],
             "output": "normalized Markdown",
             "schedule_csv_output": "optional typed records for exact filtering",
             "makes_chunk_decisions": False,
@@ -80,7 +81,7 @@ async def architecture() -> dict:
             "reads_original_file": False,
         },
         "stage_3": {"name": "structured preview", "input": "schedule CSV", "output": "typed records with source metadata", "chunking_required": False},
-        "out_of_scope": ["OCR", "database storage", "live retrieval", "embeddings"],
+        "out_of_scope": ["database storage", "live retrieval", "embeddings", "unverified chart interpretation"],
     }
 
 
@@ -202,6 +203,7 @@ async def chunk_preview(request: ChunkRequest) -> ChunkResponse:
         source_file=source_file,
         max_chars=request.max_chars,
         strategy=request.strategy,
+        content_route=result.content_route,
         overlap_chars=request.overlap_chars if request.strategy in {"auto", "hybrid"} else 0,
         chunk_count=len(chunks),
         warning_count=len(warnings),

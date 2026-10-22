@@ -1,8 +1,13 @@
 from pathlib import Path
 import hashlib
+from zipfile import BadZipFile
+
+import pymupdf as fitz
+from docx.opc.exceptions import PackageNotFoundError
 
 from gsme_rag.parsing.csv import parse_csv_to_markdown
 from gsme_rag.parsing.docx import parse_docx_to_markdown
+from gsme_rag.parsing.image import parse_image_to_markdown
 from gsme_rag.models import DocumentMetadata, ParsedDocument
 from gsme_rag.parsing.schedules import is_schedule_header, make_source_id, resolve_schedule_kind
 from gsme_rag.parsing.pdf import parse_pdf_to_markdown
@@ -17,14 +22,19 @@ def parse_to_markdown(
     suffix = input_path.suffix.casefold()
     if suffix != ".csv" and schedule_kind in {"full", "shared"}:
         raise ValueError("Full or Shared schedule type applies only to a schedule CSV")
-    if suffix == ".docx":
-        result = parse_docx_to_markdown(input_path, source_name=source_name)
-    elif suffix == ".pdf":
-        result = parse_pdf_to_markdown(input_path, source_name=source_name)
-    elif suffix == ".csv":
-        result = parse_csv_to_markdown(input_path, source_name=source_name, schedule_kind=schedule_kind)
-    else:
-        raise ValueError("Input must be a DOCX, born-digital PDF, or CSV file")
+    try:
+        if suffix == ".docx":
+            result = parse_docx_to_markdown(input_path, source_name=source_name)
+        elif suffix == ".pdf":
+            result = parse_pdf_to_markdown(input_path, source_name=source_name)
+        elif suffix == ".csv":
+            result = parse_csv_to_markdown(input_path, source_name=source_name, schedule_kind=schedule_kind)
+        elif suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}:
+            result = parse_image_to_markdown(input_path, source_name=source_name)
+        else:
+            raise ValueError("Input must be a DOCX, PDF, CSV, PNG, JPEG, TIFF, or BMP file")
+    except (fitz.FileDataError, BadZipFile, PackageNotFoundError) as error:
+        raise ValueError(f"The {suffix.lstrip('.').upper()} file is invalid or unreadable") from error
     digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
     is_schedule = False
     # Header detection checks the table header itself, never row counts or dates.

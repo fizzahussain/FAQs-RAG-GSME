@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    parse = commands.add_parser("parse", help="Normalize a DOCX, PDF, or CSV to Markdown")
+    parse = commands.add_parser("parse", help="Normalize a DOCX, PDF, CSV, or image to Markdown")
     parse.add_argument("input", type=Path)
     parse.add_argument("--output", "-o", required=True, type=Path)
     parse.add_argument("--schedule-kind", choices=["auto", "full", "shared"], default="auto")

@@ -1,8 +1,6 @@
 services:
   - type: web
     name: gsme-rag-demo
-    runtime: python
+    runtime: docker
     plan: free
-    buildCommand: pip install .
-    startCommand: python -m gsme_rag.api.run
     healthCheckPath: /v1/health
