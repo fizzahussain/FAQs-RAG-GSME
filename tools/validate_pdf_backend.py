@@ -58,6 +58,7 @@ def main() -> None:
         },
         "metadata": asdict(parsed.metadata) if parsed.metadata else None,
         "parse_warnings": [asdict(warning) for warning in parsed.warnings],
+        "evidence_diagnostics": [asdict(item) for item in parsed.evidence_diagnostics],
         "content_route": chunks.content_route,
         "chunk_count": len(chunks.chunks),
         "chunk_warnings": [asdict(warning) for warning in chunks.warnings],

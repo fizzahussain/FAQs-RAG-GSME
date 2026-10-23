@@ -652,6 +652,9 @@ def _recover_sparse_docling_pages(converted: ParsedDocument, lines: list[_Line])
         recovered = "\n\n".join(line.text for line in source_lines).strip()
         if not recovered:
             continue
+        if re.match(r"^Table of Contents\b", recovered, re.I):
+            recovered = re.sub(r"^Table of Contents\b\s*", "", recovered, count=1, flags=re.I)
+            segment += "\n\n# Table of Contents"
         segment += (
             "\n\n<!-- review-required: recovered-selectable-page -->\n\n"
             "Selectable page text omitted by Docling; reading order was recovered from the PDF text layer:\n\n"

@@ -58,4 +58,9 @@ def parse_to_markdown(
         classification_status="needs_schedule_kind" if is_schedule and not kind else "ready",
         csv_source_rows=result.csv_source_rows if is_schedule else None,
     )
+    for evidence in result.evidence_diagnostics:
+        evidence.content_sha256 = digest
+        evidence.evidence_id = "evidence-" + hashlib.sha256(
+            f"{digest}|{evidence.evidence_id}".encode("utf-8")
+        ).hexdigest()[:20]
     return result

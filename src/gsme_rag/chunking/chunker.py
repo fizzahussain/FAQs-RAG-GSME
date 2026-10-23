@@ -783,6 +783,7 @@ def chunk_markdown(
                     part_index=part_index,
                     part_count=len(body_parts),
                     source_id=source_id,
+                    content_sha256=metadata.content_sha256 if metadata else "",
                     schedule_kind=kind,
                     source_row_number=(
                         metadata.csv_source_rows[unit.table_row_number - 2]

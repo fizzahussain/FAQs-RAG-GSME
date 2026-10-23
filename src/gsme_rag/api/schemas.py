@@ -11,6 +11,17 @@ class ParseWarningOut(BaseModel):
     location: str | None = None
 
 
+class EvidenceDiagnosticOut(BaseModel):
+    evidence_id: str
+    kind: str
+    page: int
+    bbox: tuple[float, float, float, float] | None = None
+    original_text: str
+    alternate_reading: str | None = None
+    reason: str
+    content_sha256: str
+
+
 class DocumentMetadataOut(BaseModel):
     source_id: str
     content_sha256: str
@@ -34,6 +45,7 @@ class ParseResponse(BaseModel):
     markdown_character_count: int = Field(ge=0)
     warning_count: int = Field(ge=0)
     warnings: list[ParseWarningOut]
+    evidence_diagnostics: list[EvidenceDiagnosticOut] = Field(default_factory=list)
     metadata: DocumentMetadataOut
 
 
@@ -90,6 +102,7 @@ class MarkdownChunkOut(BaseModel):
     part_index: int | None = Field(default=None, ge=0)
     part_count: int | None = Field(default=None, ge=1)
     source_id: str
+    content_sha256: str | None = None
     schedule_kind: Literal["full", "shared"] | None = None
     source_row_number: int | None = None
     review_required: bool | None = None

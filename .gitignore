@@ -7,3 +7,4 @@ __pycache__/
 build/
 tmp*
 pip-ephem-wheel-cache-*/
+validation/

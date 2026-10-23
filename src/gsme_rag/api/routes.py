@@ -115,6 +115,7 @@ async def parse_preview(
             markdown_character_count=len(result.markdown),
             warning_count=len(warnings),
             warnings=warnings,
+            evidence_diagnostics=[asdict(item) for item in result.evidence_diagnostics],
             metadata=asdict(result.metadata),
         )
     finally:

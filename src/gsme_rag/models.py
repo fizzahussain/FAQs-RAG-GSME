@@ -11,6 +11,20 @@ class ParseWarning:
 
 
 @dataclass(slots=True)
+class EvidenceDiagnostic:
+    """Raw, unapproved source evidence; decisions live in a separate ledger."""
+
+    evidence_id: str
+    kind: str
+    page: int
+    bbox: tuple[float, float, float, float] | None
+    original_text: str
+    alternate_reading: str | None
+    reason: str
+    content_sha256: str = ""
+
+
+@dataclass(slots=True)
 class DocumentMetadata:
     source_id: str
     content_sha256: str
@@ -22,7 +36,7 @@ class DocumentMetadata:
     schedule_kind_source: str | None = None
     classification_status: str = "ready"
     schema_version: str = "3"
-    parser_version: str = "0.14.5"
+    parser_version: str = "0.14.6"
     csv_source_rows: list[int] | None = None
 
 
@@ -35,6 +49,7 @@ class ParsedDocument:
     warnings: list[ParseWarning] = field(default_factory=list)
     metadata: DocumentMetadata | None = None
     csv_source_rows: list[int] | None = None
+    evidence_diagnostics: list[EvidenceDiagnostic] = field(default_factory=list)
 
 
 def _extract_faq_question(
@@ -82,6 +97,7 @@ class MarkdownChunk:
     part_index: int = 0
     part_count: int = 1
     source_id: str = ""
+    content_sha256: str = ""
     schedule_kind: str | None = None
     source_row_number: int | None = None
     faq_question: str | None = None
@@ -108,6 +124,8 @@ def chunk_to_record(chunk: MarkdownChunk) -> dict:
         "source_file": chunk.source_file,
         "source_id": chunk.source_id,
     }
+    if chunk.content_sha256:
+        record["content_sha256"] = chunk.content_sha256
     if chunk.category:
         record["category"] = chunk.category
     if chunk.heading_path and chunk.heading_path != [chunk.category]:

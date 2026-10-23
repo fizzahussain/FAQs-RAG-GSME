@@ -1,6 +1,6 @@
 # GSME RAG parsing and chunking
 
-Version 0.14.5 prepares evidence for two future search paths. DOCX, PDF and standalone image files become normalized Markdown, then a separate chunker creates semantic evidence. Schedule CSVs also become readable Markdown, while a typed row reader handles exact technology, flavor and date filters. There is no database, embedding index, LLM or answer generation in this release.
+Version 0.14.6 prepares evidence for two future search paths. DOCX, PDF and standalone image files become normalized Markdown, then a separate chunker creates semantic evidence. Schedule CSVs also become readable Markdown, while a typed row reader handles exact technology, flavor and date filters. There is no database, embedding index, LLM or answer generation in this release.
 
 | Source | Default output | Search path |
 | --- | --- | --- |
@@ -76,3 +76,5 @@ For the direct audit of the attached 0.13.0 ZIP, fixes and limits, see [Audit](d
 Install the optional PDF dependencies with `.\.venv\Scripts\python.exe -m pip install -e ".[pdf,test]"`. In PowerShell, run `$env:GSME_PDF_BACKEND = "docling"`, then parse the three-page test PDF again. Inspect `strategy_used` in the `/v1/parse` JSON: `docling_layout_ocr_to_markdown` confirms that Docling produced the result. `pymupdf_table_fallback` means the native backend ran; inspect `docling_unavailable`, `docling_failed`, or `docling_empty_fallback` warnings. Chunk the new normalized Markdown and verify that the page 3 opening is no longer under the page 2 heading. The synthetic PDF filename remains 0.14.3 because its contents are unchanged.
 
 Version 0.14.5 also suppresses repeated logo-only visual placeholders, removes repeated PDF margin furniture while retaining canonical source metadata once, recovers selectable pages that Docling reduced to fragments, and keeps every inferred Docling table row review-required. See [0.14.5 changes and validation](docs/CHANGES_0.14.5.md).
+
+Version 0.14.6 captures Docling grid-cell losses as source-located raw diagnostics, flags damaged formula and font regions without rewriting them, records unmapped chart labels, and adds a default-deny review gate for future indexing. Review decisions are separate from parse output. See [0.14.6 changes](docs/CHANGES_0.14.6.md).
