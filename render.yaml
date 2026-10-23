@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: gsme-rag-demo
+    runtime: docker
+    plan: free
+    healthCheckPath: /v1/health
