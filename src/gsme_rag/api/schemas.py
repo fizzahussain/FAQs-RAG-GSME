@@ -106,6 +106,8 @@ class MarkdownChunkOut(BaseModel):
     schedule_kind: Literal["full", "shared"] | None = None
     source_row_number: int | None = None
     review_required: bool | None = None
+    evidence_status: str = "pending"
+    chunker_version: str = "0.14.7"
 
 
 class ChunkResponse(BaseModel):

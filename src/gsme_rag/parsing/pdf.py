@@ -279,7 +279,8 @@ def _layout_markdown(lines: list[_Line], allow_visual_headings: bool = True) -> 
     return finish_markdown(parts)
 
 
-def _native_markdown(document: fitz.Document, lines: list[_Line]) -> tuple[str, list[ParseWarning]]:
+def _native_markdown(document: fitz.Document, lines: list[_Line],
+                     fidelity_pages: set[int] | None = None) -> tuple[str, list[ParseWarning]]:
     """Keep detected tables intact when the optional Docling backend is unavailable."""
     parts: list[str] = []
     warnings: list[ParseWarning] = []
@@ -289,7 +290,7 @@ def _native_markdown(document: fitz.Document, lines: list[_Line]) -> tuple[str, 
         tables = list(page.find_tables().tables)
         accepted_tables = []
         entries: list[tuple[float, str | _Line]] = []
-        page_review_required = False
+        page_review_required = page_no in (fidelity_pages or set())
         for table in tables:
             cells = [[cell or "" for cell in row] for row in table.extract()]
             # A one-row region often contains a formula rather than a table.
@@ -964,13 +965,18 @@ def parse_pdf_to_markdown(
                         code="docling_failed",
                         message=f"Docling could not process this PDF ({type(error).__name__}: {str(error)[:180]}); native extraction needs review",
                     ))
-            markdown, native_warnings = _native_markdown(document, lines)
+            from gsme_rag.parsing.fidelity import inspect_pdf_fidelity
+            fidelity_evidence, fidelity_warnings, fidelity_pages = inspect_pdf_fidelity(
+                document, max_ocr_regions=0)
+            markdown, native_warnings = _native_markdown(document, lines, fidelity_pages)
             warnings.extend(native_warnings)
+            warnings.extend(fidelity_warnings)
             if not markdown.replace("<!--", "").strip() or not lines and not any(w.code == "ocr_needs_review" for w in warnings):
                 warnings.append(ParseWarning(code="no_pdf_text", message="No readable text was recovered"))
             return ParsedDocument(
                 filename=display_name, document_type="pdf", strategy_used="pymupdf_table_fallback",
                 markdown=markdown, warnings=warnings,
+                evidence_diagnostics=fidelity_evidence,
             )
 
     if special_faq:

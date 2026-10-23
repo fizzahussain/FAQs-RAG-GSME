@@ -1,6 +1,6 @@
 # GSME RAG parsing and chunking
 
-Version 0.14.6 prepares evidence for two future search paths. DOCX, PDF and standalone image files become normalized Markdown, then a separate chunker creates semantic evidence. Schedule CSVs also become readable Markdown, while a typed row reader handles exact technology, flavor and date filters. There is no database, embedding index, LLM or answer generation in this release.
+Version 0.14.7 prepares evidence for two future search paths. DOCX, PDF and standalone image files become normalized Markdown, then a separate chunker creates semantic evidence. Schedule CSVs also become readable Markdown, while a typed row reader handles exact technology, flavor and date filters. There is no database, embedding index, LLM or answer generation in this release.
 
 | Source | Default output | Search path |
 | --- | --- | --- |
@@ -78,3 +78,5 @@ Install the optional PDF dependencies with `.\.venv\Scripts\python.exe -m pip in
 Version 0.14.5 also suppresses repeated logo-only visual placeholders, removes repeated PDF margin furniture while retaining canonical source metadata once, recovers selectable pages that Docling reduced to fragments, and keeps every inferred Docling table row review-required. See [0.14.5 changes and validation](docs/CHANGES_0.14.5.md).
 
 Version 0.14.6 captures Docling grid-cell losses as source-located raw diagnostics, flags damaged formula and font regions without rewriting them, records unmapped chart labels, and adds a default-deny review gate for future indexing. Review decisions are separate from parse output. See [0.14.6 changes](docs/CHANGES_0.14.6.md).
+
+Version 0.14.7 makes all semantic chunks pending until separately approved, excludes TOC navigation and document furniture from future indexing, and quarantines native formula-fidelity pages. The optional Docling path was exercised separately on source-page slices; no search service or embedding model is installed. See [0.14.7 changes](docs/CHANGES_0.14.7.md).
