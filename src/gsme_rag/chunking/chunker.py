@@ -19,6 +19,7 @@ PAPER_HEADING = re.compile(
     r"conclusions?|references|related work|materials(?: and methods)?|measurements?)\b",
     re.IGNORECASE,
 )
+CHUNKER_VERSION = "0.14.7"
 
 
 @dataclass(slots=True)
@@ -762,7 +763,8 @@ def chunk_markdown(
                 )
             index = len(chunks)
             digest = hashlib.sha256(
-                f"{source_id}|{normalized_hash}|{strategy}|{index}|{text}".encode("utf-8")
+                f"{source_id}|{metadata.parser_version if metadata else 'unversioned'}|"
+                f"{CHUNKER_VERSION}|{normalized_hash}|{strategy}|{index}|{text}".encode("utf-8")
             ).hexdigest()[:16]
             chunks.append(
                 MarkdownChunk(
@@ -794,6 +796,12 @@ def chunk_markdown(
                         else None
                     ),
                     review_required=unit.review_required,
+                    evidence_status=(
+                        "excluded" if bool(re.search(r"\.{8,}\s*\d{1,4}\b", unit.body))
+                        or unit.body.strip().isdigit()
+                        or unit.body.startswith("Source document metadata:")
+                        else "pending"
+                    ),
                 )
             )
 

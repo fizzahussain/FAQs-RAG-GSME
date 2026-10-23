@@ -14,6 +14,7 @@ class ReviewDecision:
     decision: str  # approved or rejected
     reviewer: str
     rationale: str
+    source_verified: bool = False
 
     def __post_init__(self) -> None:
         if self.decision not in {"approved", "rejected"}:
@@ -26,10 +27,26 @@ class ReviewDecision:
 class ReviewLedger:
     decisions: list[ReviewDecision] = field(default_factory=list)
 
-    def approved(self, content_sha256: str, evidence_id: str) -> bool:
+    def approved(self, content_sha256: str, evidence_id: str,
+                 require_source_verification: bool = False) -> bool:
         relevant = [item for item in self.decisions
                     if item.content_sha256 == content_sha256 and item.evidence_id == evidence_id]
-        return bool(relevant and relevant[-1].decision == "approved")
+        return bool(relevant and relevant[-1].decision == "approved"
+                    and (not require_source_verification or relevant[-1].source_verified))
+
+    def status_for(self, chunk: MarkdownChunk) -> str:
+        if chunk.evidence_status == "excluded":
+            return "excluded"
+        relevant = [item for item in self.decisions
+                    if item.content_sha256 == chunk.content_sha256
+                    and item.evidence_id == chunk.chunk_id]
+        if not relevant:
+            return "pending"
+        latest = relevant[-1]
+        if latest.decision == "rejected":
+            return "rejected"
+        return ("approved" if latest.source_verified or not chunk.review_required
+                else "pending")
 
     @classmethod
     def load(cls, path: Path) -> "ReviewLedger":
@@ -46,10 +63,9 @@ class ReviewLedger:
 
 
 def eligible_for_embedding(chunk: MarkdownChunk, ledger: ReviewLedger | None = None) -> bool:
-    """Default-deny uncertain evidence; generic visual gaps are never semantic content."""
+    """Pending and excluded evidence is never published by absence of a review flag."""
+    if chunk.evidence_status in {"rejected", "excluded"}:
+        return False
     if "Visual evidence on page" in chunk.text and "no verified description" in chunk.text:
         return False
-    if not chunk.review_required:
-        return True
-    return bool(ledger and chunk.content_sha256
-                and ledger.approved(chunk.content_sha256, chunk.chunk_id))
+    return bool(ledger and chunk.content_sha256 and ledger.status_for(chunk) == "approved")

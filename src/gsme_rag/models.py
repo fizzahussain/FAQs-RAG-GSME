@@ -36,7 +36,7 @@ class DocumentMetadata:
     schedule_kind_source: str | None = None
     classification_status: str = "ready"
     schema_version: str = "3"
-    parser_version: str = "0.14.6"
+    parser_version: str = "0.14.7"
     csv_source_rows: list[int] | None = None
 
 
@@ -102,6 +102,8 @@ class MarkdownChunk:
     source_row_number: int | None = None
     faq_question: str | None = None
     review_required: bool = False
+    evidence_status: str = "pending"
+    chunker_version: str = "0.14.7"
 
     def __post_init__(self) -> None:
         if self.faq_question is None:
@@ -144,6 +146,8 @@ def chunk_to_record(chunk: MarkdownChunk) -> dict:
         record["schedule_kind"] = chunk.schedule_kind
     if chunk.review_required:
         record["review_required"] = True
+    record["evidence_status"] = chunk.evidence_status
+    record["chunker_version"] = chunk.chunker_version
     if chunk.part_count > 1:
         record.update(
             unit_id=chunk.unit_id,
