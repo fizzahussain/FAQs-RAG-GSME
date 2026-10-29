@@ -1,0 +1,5 @@
+{
+  "source": "synthetic",
+  "cases": [],
+  "instructions": "The local demo generates the tenant and chunk ID. Fill this only with that explicit fixture; these numbers do not measure GSME source quality."
+}

@@ -200,7 +200,7 @@ def parse_docx_to_markdown(
         if table_has_ocr:
             parts.append("<!-- review-end -->")
 
-    # Word headers/footers can contain embedded diagrams too; visit each part once.
+    # Check each header and footer once for embedded images
     visited = set()
     for section in document.sections:
         for label, region in (("header", section.header), ("footer", section.footer)):

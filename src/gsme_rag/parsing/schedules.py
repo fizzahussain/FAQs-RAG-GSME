@@ -92,13 +92,18 @@ def parse_schedule_records(path: str | Path) -> list[dict]:
             raise ValueError(f"Schedule CSV has unsupported columns: {', '.join(extra)}")
 
         records = []
-        for raw in reader:
-            row_number = reader.line_num
+        while True:
+            # line_num points past the last record so add one before reading
+            row_number = reader.line_num + 1
+            try:
+                raw = next(reader)
+            except StopIteration:
+                break
             if not any(value.strip() for value in raw):
                 continue
             if any(value.strip() for value in raw[len(headings):]):
                 raise ValueError(f"row {row_number}: more cells than column names")
-            row = dict(zip(headings, [value.strip() for value in raw[:len(headings)]]))
+            row = dict(zip(headings, [value.strip() for value in raw[:len(headings)]], strict=False))
             row = {name: row.get(name, "") for name in SCHEDULE_COLUMNS}
             if not row["technology_nm"].isdigit():
                 raise ValueError(f"row {row_number}: technology_nm must be a whole number")

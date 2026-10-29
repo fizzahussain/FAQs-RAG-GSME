@@ -7,7 +7,7 @@ from gsme_rag.api.routes import router
 def create_app() -> FastAPI:
     app = FastAPI(
         title="GSME RAG Pipeline Demo",
-        version="0.14.7",
+        version="0.15.4",
         description=(
             "Stage 1 normalizes DOCX, PDF, CSV, or image input to Markdown. "
             "Stage 2 routes semantic Markdown units automatically. Schedule CSVs "

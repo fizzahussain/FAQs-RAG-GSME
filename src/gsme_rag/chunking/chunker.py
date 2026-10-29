@@ -240,7 +240,7 @@ def _merge_plain_numbered_questions(blocks: list[_Block]) -> list[_Block]:
         and blocks[index + 1].kind == "paragraph"
         and _plain_text(blocks[index + 1].text).endswith("?")
     ]
-    # One accidental numbered line must not change a narrative document.
+    # One numbered line is too little evidence to call this an FAQ
     if len(pair_indexes) < 3:
         return blocks
 
@@ -342,7 +342,7 @@ def _overlap_parts(parts: list[str], limit: int, overlap_chars: int) -> list[str
     if len(parts) < 2 or overlap_chars == 0:
         return parts
     result = [parts[0]]
-    for previous, part in zip(parts, parts[1:]):
+    for previous, part in zip(parts, parts[1:], strict=False):
         sentences = re.split(r"(?<=[.!?])\s+", previous.strip())
         tail: list[str] = []
         for sentence in reversed(sentences):
@@ -412,6 +412,7 @@ def _table_units(block: _Block, heading_path: list[str]) -> list[_Unit]:
             and cells[question_column].strip() == cells[answer_column].strip()
             and not cells[question_column].strip().endswith("?")
         ):
+            # Some exports use a question cell as a category separator
             active_category = cells[question_column].strip()
             continue
         if not category:
@@ -507,9 +508,7 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False,
 
         if block.kind == "page_break":
             flush_generic()
-            # Opening text before a new chapter belongs to the new page, not
-            # to the final section of the preceding page. A continuing page
-            # without an early chapter heading retains its section context.
+            # A new page heading starts a new section context
             upcoming = blocks[index + 1:index + 4]
             if any(item.kind == "heading" and item.level == 1 for item in upcoming):
                 heading_stack = []
@@ -546,8 +545,7 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False,
                     break
                 if _is_question(following.text):
                     break
-                # FAQ answers may wrap onto a second page, but never absorb an
-                # unrelated chapter several pages later without a new question.
+                # An answer may cross one page without absorbing a later chapter
                 if (block.page_start is not None and following.page_start is not None
                         and following.page_start > block.page_start + 1):
                     break
@@ -556,9 +554,7 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False,
                     and following.page_start != answer_blocks[-1].page_end
                     and answer_blocks[-1].text.rstrip().endswith((".", "!", "?"))
                 ):
-                    # A completed answer only continues onto the next page when
-                    # that page also contains the next FAQ question. This keeps
-                    # a split answer together without swallowing a later topic.
+                    # A complete answer crosses pages only within the FAQ run
                     has_next_question_on_page = False
                     for candidate in blocks[next_index + 1:]:
                         if candidate.kind == "page_break":
@@ -616,11 +612,10 @@ def detect_content_route(blocks: list[_Block]) -> str:
         ):
             manual_structure += 1
     pages = {block.page_start for block in blocks if block.page_start is not None}
-    # A few question-shaped captions or passages in a long technical manual do
-    # not make the entire document an FAQ.
+    # A few question shaped captions do not make a manual an FAQ
     if len(pages) >= 10 and not has_faq_table and question_count < max(3, len(pages) // 20):
         return "paper"
-    # A few bold questions in a structured technical manual do not make it an FAQ.
+    # Chapter numbering is stronger evidence of a manual
     if manual_structure >= 4 and question_count < 4 and not has_faq_table:
         return "paper"
     has_faq = question_count > 0 or has_faq_table
@@ -683,9 +678,10 @@ def chunk_markdown(
     if is_schedule and not kind:
         raise ValueError("Schedule type is unknown. Select Full or Shared before chunking or ingesting.")
     if metadata and metadata.classification_status != "ready" and is_schedule:
-        # A newer explicit selection must come through a new parse request.
+        # Reparse after changing Full or Shared classification
         raise ValueError("Schedule metadata needs review. Reparse with Full or Shared selected.")
     if is_schedule and not semantic_schedule_rows:
+        # Exact schedule dates come from typed rows without semantic chunks
         return ChunkResult(content_route="schedule", warnings=[ParseWarning(
             code="structured_records_only",
             message="Schedule rows are typed records for exact filtering. Enable semantic schedule rows to create optional discovery chunks.",
@@ -695,6 +691,7 @@ def chunk_markdown(
 
     selected_route = "schedule" if is_schedule else content_route or detect_content_route(blocks)
     if strategy == "fixed_size":
+        # Fixed size stays as a comparison baseline
         units = [
             _Unit("fixed_size", part, [], None, None, review_required="<!-- review-required:" in markdown)
             for part in _split_text(markdown.strip(), max_chars)
@@ -705,6 +702,7 @@ def chunk_markdown(
     chunks: list[MarkdownChunk] = []
     warnings: list[ParseWarning] = []
     if metadata and normalized_hash != metadata.normalized_sha256:
+        # Edited Markdown cannot keep the old source row mapping
         warnings.append(ParseWarning(
             code="markdown_edited",
             message="Markdown changed after parsing; the chunk hash identifies this edited version.",
@@ -733,6 +731,7 @@ def chunk_markdown(
         elif unit.kind == "table" and not unit.anchor:
             body_parts = _split_text(unit.body, body_limit)
         elif unit.body:
+            # Overlap is only for long prose and never for FAQ or table rows
             use_overlap = strategy in {"auto", "hybrid"} and unit.kind == "section" and len(unit.body) > body_limit
             effective_overlap = min(overlap_chars, body_limit // 4) if use_overlap else 0
             part_limit = body_limit - effective_overlap
@@ -743,6 +742,7 @@ def chunk_markdown(
             body_parts = [""]
 
         source_id = metadata.source_id if metadata else f"md-{normalized_hash[:16]}"
+        # Unit IDs group parts when one source unit needs several chunks
         unit_digest = hashlib.sha256(
             f"{source_id}|{normalized_hash}|{unit_index}|{unit.kind}|{unit.body}".encode("utf-8")
         ).hexdigest()[:16]
@@ -762,6 +762,7 @@ def chunk_markdown(
                     )
                 )
             index = len(chunks)
+            # Parser and chunker versions keep old approvals from crossing revisions
             digest = hashlib.sha256(
                 f"{source_id}|{metadata.parser_version if metadata else 'unversioned'}|"
                 f"{CHUNKER_VERSION}|{normalized_hash}|{strategy}|{index}|{text}".encode("utf-8")
@@ -787,6 +788,7 @@ def chunk_markdown(
                     source_id=source_id,
                     content_sha256=metadata.content_sha256 if metadata else "",
                     schedule_kind=kind,
+                    # Map a schedule row only when Markdown still matches its source
                     source_row_number=(
                         metadata.csv_source_rows[unit.table_row_number - 2]
                         if is_schedule and metadata and metadata.csv_source_rows

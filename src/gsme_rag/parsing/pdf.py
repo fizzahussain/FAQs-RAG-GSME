@@ -62,8 +62,7 @@ def _extract_lines(document: fitz.Document) -> list[_Line]:
     if len(document) < 2:
         return sorted(lines, key=lambda line: (line.page, round(line.y0, 1), line.x0))
 
-    # Repeated margin text is source metadata, not page evidence. Require the
-    # same line in a majority of pages and restrict removal to page margins.
+    # Remove repeated margin text only when most pages share it
     repeated: Counter[tuple[str, str]] = Counter()
     for line in lines:
         page_height = document[line.page - 1].rect.height
@@ -92,7 +91,7 @@ def _detect_table_layout(lines: list[_Line], page_width: float) -> bool:
         and re.match(r"^\d{1,3}\s+", line.text)
     ]
     right_text = sum(1 for line in lines if line.x0 >= page_width * 0.33)
-    # Numbered technical steps and two-column prose are not an FAQ table.
+    # Numbered steps and two column prose can resemble an FAQ table
     question_lines = sum(
         "?" in line.text
         for line in lines
@@ -293,8 +292,7 @@ def _native_markdown(document: fitz.Document, lines: list[_Line],
         page_review_required = page_no in (fidelity_pages or set())
         for table in tables:
             cells = [[cell or "" for cell in row] for row in table.extract()]
-            # A one-row region often contains a formula rather than a table.
-            # Full-page detections can swallow captions, prose and other tables.
+            # Reject one row and full page table guesses
             oversized = (fitz.Rect(table.bbox).get_area() > page.rect.get_area() * .65
                          or max((len(cell) for row in cells for cell in row), default=0) > 600)
             if len(cells) < 2 or not any(cells[0]) or oversized:
@@ -305,10 +303,13 @@ def _native_markdown(document: fitz.Document, lines: list[_Line],
                 ))
                 page_review_required = True
                 continue
-            # PyMuPDF may infer spacer columns around each genuine column.
+            # Ignore inferred spacer columns without text
             keep = [col for col in range(max(map(len, cells)))
                     if any(col < len(row) and row[col].strip() for row in cells)]
             cells = [[row[col] if col < len(row) else "" for col in keep] for row in cells]
+            # A border only row at the end has no source text
+            while len(cells) > 1 and not any(value.strip() for value in cells[-1]):
+                cells.pop()
             rendered_table = render_markdown_table(cells)
             formula = table_requires_review(rendered_table)
             rendered_table = (
@@ -324,7 +325,7 @@ def _native_markdown(document: fitz.Document, lines: list[_Line],
             accepted_tables.append(table)
             entries.append((table.bbox[1], rendered_table))
         for line in page_lines:
-            # Table cells are already in a table; do not repeat them as prose.
+            # Do not repeat table cells as prose
             in_table = any(
                 table.bbox[0] <= (line.x0 + line.x1) / 2 <= table.bbox[2]
                 and table.bbox[1] <= (line.y0 + line.y1) / 2 <= table.bbox[3]
@@ -349,7 +350,7 @@ def _native_markdown(document: fitz.Document, lines: list[_Line],
                             code="image_ocr_unavailable", message=f"Could not OCR scanned page: {error}",
                             location=f"page {page_no}",
                         ))
-                # Whole-page OCR can rediscover only the repeated page furniture.
+                # Whole page OCR can repeat page furniture
                 recovered = re.sub(r"(?im)^MANUFACTURING DOCUMENT DOC NO:.*(?:\n|$)", "", recovered)
                 recovered = re.sub(r"(?im)^\d+\s+CONFIDENTIAL:.*(?:\n|$)", "", recovered).strip()
                 native_length = len(" ".join(line.text for line in page_lines))
@@ -374,8 +375,7 @@ def _native_markdown(document: fitz.Document, lines: list[_Line],
                 code="figure_needs_review", message="A large image or chart may contain facts not present in extracted text",
                 location=f"page {page_no}",
             ))
-        # The page may have selectable prose and a separate scanned figure.
-        # OCR large raster regions independently, keeping them at their page position.
+        # OCR scanned figures separately from selectable prose
         if len(" ".join(line.text for line in page_lines)) >= 90:
             image_count = 0
             for info in page.get_image_info(xrefs=True):
@@ -446,8 +446,7 @@ def _native_markdown(document: fitz.Document, lines: list[_Line],
                       and any(re.search(r"\bFigure\s+\d+", line.text, re.I) for line in page_lines)
                       and bool(vector_regions or len(page.get_images()) >= 3))
         if chart_text:
-            # Chart labels without their spatial relationships are unsafe as
-            # apparently ordinary prose or inferred Markdown headings.
+            # Chart labels alone cannot explain their visual relationships
             page_review_required = True
         visual_missing = bool(image_regions or vector_regions or chart_text)
         if visual_missing:
@@ -574,7 +573,7 @@ def _remove_repeated_pdf_furniture(markdown: str, document: fitz.Document) -> tu
                         else "bottom" if y1 > page.rect.height * .87 else "")
                 if not zone:
                     continue
-                # Footer lines often begin with the changing physical page number.
+                # Footer page numbers change on every page
                 stable = re.sub(r"^\d+\s+(?=\S)", "", value)
                 key = (zone, stable.casefold())
                 repeated[key] += 1
@@ -614,7 +613,7 @@ def _remove_repeated_pdf_furniture(markdown: str, document: fitz.Document) -> tu
                 "\n", segment,
             )
             removed += count
-        # Removing a furniture-only OCR block must not leave empty review markers.
+        # Drop empty review wrappers after removing page furniture
         segment = re.sub(
             r"(?s)<!-- review-required:\s*[-\w]+\s*-->\s*<!-- review-end -->",
             "", segment,
@@ -647,9 +646,7 @@ def _recover_sparse_docling_pages(converted: ParsedDocument, lines: list[_Line])
         existing = normalize_inline(" ".join(_plain_markdown_line(line) for line in existing.splitlines()))
         if len(existing) >= source_length * .25:
             continue
-        # Keep recovery as evidence text, not inferred headings: a table of
-        # contents consists mostly of numbered lines and must not disappear as
-        # heading-only context during chunking.
+        # Keep recovered contents as text so chunking does not lose them
         recovered = "\n\n".join(line.text for line in source_lines).strip()
         if not recovered:
             continue
@@ -688,8 +685,7 @@ def _insert_image_ocr_at_figure(segment: str, value: str) -> str:
     if caption_index is None:
         return segment.rstrip() + "\n\n" + block
     insert_at = caption_index + 1
-    # Keep a caption's existing review wrapper intact, then place OCR before
-    # the next heading or prose block.
+    # Put OCR beside its caption inside the review wrapper
     while insert_at < len(lines) and lines[insert_at].strip().startswith("<!--"):
         if lines[insert_at].strip() == "<!-- review-end -->":
             insert_at += 1
@@ -888,8 +884,7 @@ def parse_pdf_to_markdown(
     if backend not in {"auto", "native", "docling"}:
         raise ValueError("GSME_PDF_BACKEND must be auto, native or docling")
 
-    # Bounded API uploads are opened from bytes so a failed PyMuPDF open
-    # cannot retain the temporary PDF file on Windows.
+    # Open demo PDFs from bytes to release temporary files on Windows
     if input_path.stat().st_size <= 20 * 1024 * 1024:
         document = fitz.open(stream=input_path.read_bytes(), filetype="pdf")
     else:

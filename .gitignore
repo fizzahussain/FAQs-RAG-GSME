@@ -1,4 +1,7 @@
 .venv/
+.env
+.env.*
+!.env.example
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -8,3 +11,6 @@ build/
 tmp*
 pip-ephem-wheel-cache-*/
 validation/
+data/
+_deps/
+GSME_RAG_Storage_*.zip

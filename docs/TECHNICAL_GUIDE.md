@@ -1,6 +1,6 @@
 # Parsing and chunking technical guide
 
-Version 0.14.7. This is a preparation demo: it has no vector index, database, answer generator or KPI calculation.
+Version 0.14.8. This is a preparation demo: it includes a PostgreSQL schema and local Compose template but no running storage adapter, vector index, answer generator or KPI calculation.
 
 Docling conversion diagnostics are returned separately from normalized Markdown as `evidence_diagnostics`: stable evidence ID, original source SHA-256, page, PDF-coordinate bounding box, raw selectable text, optional independent OCR reading, and review reason. A grid-matcher loss retains every raw grid cell and marks the dropped ones. Do not treat a successful HTTP conversion or recovered TOC prose as verified table structure. `review.py` keeps reviewer decisions in a separate JSON ledger; `eligible_for_embedding` denies review-required chunks without explicit approval and always denies generic visual-gap placeholders. No embedding operation is implemented here.
 

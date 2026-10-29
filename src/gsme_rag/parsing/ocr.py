@@ -56,8 +56,7 @@ def ocr_image(image_bytes: bytes) -> str:
             info = page.get_image_info()
             source_width = int(info[0].get("width", 0)) if info else 0
             source_height = int(info[0].get("height", 0)) if info else 0
-            # Preserve source pixels when they already fit the OCR bounds.
-            # Enlarging the validation PNG changed its visible A17 to Al7.
+            # Upscaling this source changed A17 into Al7 during OCR
             if (len(image) == 1 and source_width and source_height
                     and max(source_width, source_height) <= 2600
                     and source_width * source_height <= 6_000_000):

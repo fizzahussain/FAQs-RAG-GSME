@@ -1,6 +1,6 @@
 # GSME RAG parsing and chunking
 
-Version 0.14.7 prepares evidence for two future search paths. DOCX, PDF and standalone image files become normalized Markdown, then a separate chunker creates semantic evidence. Schedule CSVs also become readable Markdown, while a typed row reader handles exact technology, flavor and date filters. There is no database, embedding index, LLM or answer generation in this release.
+Version 0.15.4 keeps the parsing and chunking demo and adds separate local administrator CLI and browser paths for reviewed embeddings and storage. DOCX, PDF and standalone image files become normalized Markdown, then the chunker creates semantic candidates. Schedule CSVs also become readable Markdown, while typed rows handle exact technology, flavor and date filters. PostgreSQL owns document versions, review decisions, jobs and schedules. A worker sends only approved current evidence to a configurable embedding provider and Qdrant. Search rechecks each result in PostgreSQL. An earlier source-verified FAQ chunk passed a live Cohere Pro/Fast smoke before being revoked and removed. No LLM answer generation is included.
 
 | Source | Default output | Search path |
 | --- | --- | --- |
@@ -80,3 +80,17 @@ Version 0.14.5 also suppresses repeated logo-only visual placeholders, removes r
 Version 0.14.6 captures Docling grid-cell losses as source-located raw diagnostics, flags damaged formula and font regions without rewriting them, records unmapped chart labels, and adds a default-deny review gate for future indexing. Review decisions are separate from parse output. See [0.14.6 changes](docs/CHANGES_0.14.6.md).
 
 Version 0.14.7 makes all semantic chunks pending until separately approved, excludes TOC navigation and document furniture from future indexing, and quarantines native formula-fidelity pages. The optional Docling path was exercised separately on source-page slices; no search service or embedding model is installed. See [0.14.7 changes](docs/CHANGES_0.14.7.md).
+
+Version 0.14.8 adds a local storage schema and a fail-closed, tokenizer-aware indexing candidate boundary. It does not publish points or make search available. See [0.14.8 changes](docs/CHANGES_0.14.8.md).
+
+## Local embeddings and storage increment
+
+The parsing demo still runs independently. A local administrator CLI and a separate loopback-only [evidence console](docs/STORAGE_INCREMENT.md#local-evidence-console) add PostgreSQL-backed version/review/jobs and typed Full/Shared schedules, plus derived Qdrant evidence search. Neither is exposed on Render. Install `.[storage,test]`, start `compose.local.yaml`, run `python -m gsme_rag.storage.cli migrate`, then run `python tools/demo_storage_fixture.py` for a synthetic smoke test. Real source indexing remains gated on source-verified review and explicit external-content permission.
+
+The [0.15.1 code audit](docs/CODE_AUDIT_0.15.1.md) lists the readability and efficiency changes and the remaining service checks.
+
+The [0.15.2 storage audit](docs/CHANGES_0.15.2.md) records the live service checks and fixes since that audit.
+
+The [0.15.3 embedding handoff](docs/CHANGES_0.15.3.md) records the Cohere SDK review, narrowed worker scope, payload cleanup, and live one-chunk smoke test.
+
+The [0.15.4 local evidence console](docs/CHANGES_0.15.4.md) exposes upload, inspection, source review, publication, embedding status/preview, and cited retrieval on localhost only. It does not add a public storage endpoint or an LLM answer generator.

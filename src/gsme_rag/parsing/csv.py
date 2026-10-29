@@ -17,10 +17,16 @@ def parse_csv_to_markdown(
 
     with input_path.open("r", encoding="utf-8-sig", newline="") as source:
         reader = csv.reader(source)
-        nonempty = [
-            (reader.line_num, [value.strip() for value in row])
-            for row in reader if any(value.strip() for value in row)
-        ]
+        nonempty = []
+        while True:
+            # Keep the first physical line when a quoted cell spans several lines
+            physical_line = reader.line_num + 1
+            try:
+                row = next(reader)
+            except StopIteration:
+                break
+            if any(value.strip() for value in row):
+                nonempty.append((physical_line, [value.strip() for value in row]))
 
     rows = [row for _, row in nonempty]
     if not rows:
@@ -44,7 +50,7 @@ def parse_csv_to_markdown(
                 row.pop()
         expected_width -= 1
     normalized_rows: list[list[str]] = []
-    for (row_number, _), row in zip(nonempty, rows):
+    for (row_number, _), row in zip(nonempty, rows, strict=True):
         if len(row) != expected_width:
             warnings.append(
                 ParseWarning(
@@ -71,7 +77,7 @@ def parse_csv_to_markdown(
 
     recognized_schedule = is_schedule_header(normalized_rows[0])
     if recognized_schedule:
-        # Semantic discovery and exact filtering must accept the same schedule rows.
+        # Exact and semantic paths must agree on accepted schedule rows
         parse_schedule_records(input_path)
     if not recognized_schedule and schedule_kind in {"full", "shared"}:
         raise ValueError("The selected schedule type requires the known schedule columns")

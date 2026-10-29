@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_DB: gsme_rag
+      POSTGRES_USER: gsme_rag
+      POSTGRES_PASSWORD: ${GSME_POSTGRES_PASSWORD:?Set GSME_POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - gsme_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gsme_rag -d gsme_rag"]
+      interval: 10s
+      retries: 5
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - gsme_qdrant:/qdrant/storage
+volumes:
+  gsme_postgres:
+  gsme_qdrant:

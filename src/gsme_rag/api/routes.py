@@ -44,6 +44,7 @@ async def _save_upload(upload: UploadFile) -> tuple[Path, str, str]:
         )
 
     total = 0
+    # Stream demo uploads to disk within the public size limit
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as target:
         path = Path(target.name)
         while chunk := await upload.read(1024 * 1024):
@@ -81,7 +82,8 @@ async def architecture() -> dict:
             "reads_original_file": False,
         },
         "stage_3": {"name": "structured preview", "input": "schedule CSV", "output": "typed records with source metadata", "chunking_required": False},
-        "out_of_scope": ["database storage", "live retrieval", "embeddings", "unverified chart interpretation"],
+        "local_storage_cli": "Separate authenticated local operator process; not mounted in this public demo",
+        "out_of_scope": ["public ingestion", "public review", "LLM answers", "unverified chart interpretation"],
     }
 
 
@@ -140,11 +142,16 @@ async def schedule_preview(
         if suffix != ".csv":
             raise HTTPException(status_code=415, detail="A schedule CSV is required")
         try:
+            # This public endpoint previews rows without saving them to the database
             records = await asyncio.to_thread(parse_schedule_records, path)
             kind = resolve_schedule_kind(original_name, schedule_kind)
             if kind is None:
                 raise ValueError("Schedule type is unknown. Select Full or Shared for this CSV.")
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            digest_builder = hashlib.sha256()
+            with path.open("rb") as source:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    digest_builder.update(block)
+            digest = digest_builder.hexdigest()
             source_id = make_source_id(digest, kind)
             kind_source = "filename" if resolve_schedule_kind(original_name) == kind else "user"
             matched = filter_schedule_records(
@@ -181,6 +188,7 @@ async def schedule_preview(
 async def chunk_preview(request: ChunkRequest) -> ChunkResponse:
     source_file = Path(request.source_file).name or "normalized.md"
     try:
+        # The chunker reads normalized Markdown and optional parse metadata
         metadata = DocumentMetadata(**request.metadata.model_dump()) if request.metadata else None
         result = await asyncio.to_thread(
             chunk_markdown,

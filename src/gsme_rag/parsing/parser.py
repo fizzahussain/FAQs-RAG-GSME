@@ -35,9 +35,14 @@ def parse_to_markdown(
             raise ValueError("Input must be a DOCX, PDF, CSV, PNG, JPEG, TIFF, or BMP file")
     except (fitz.FileDataError, BadZipFile, PackageNotFoundError) as error:
         raise ValueError(f"The {suffix.lstrip('.').upper()} file is invalid or unreadable") from error
-    digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    # Read the original in blocks so a large file is never hashed in memory
+    digest_builder = hashlib.sha256()
+    with input_path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest_builder.update(block)
+    digest = digest_builder.hexdigest()
     is_schedule = False
-    # Header detection checks the table header itself, never row counts or dates.
+    # The CSV header decides whether this is a schedule
     if suffix == ".csv":
         header = next((line for line in result.markdown.splitlines() if line.startswith("|")), "")
         is_schedule = is_schedule_header(header.strip("|").split("|"))

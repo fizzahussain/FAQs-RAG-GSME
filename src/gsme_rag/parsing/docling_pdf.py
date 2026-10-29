@@ -145,8 +145,7 @@ def _normalize_document(document, source_name: str, review_pages: set[int],
     picture_count = 0
     last_header_part: int | None = None
     last_header_page: int | None = None
-    # Docling can emit a caption before or after its picture. Collect these up
-    # front so the separate caption item cannot duplicate the figure caption.
+    # Match captions before collecting pictures to avoid duplicates
     emitted_picture_captions = {
         caption.casefold()
         for item, _ in document.iterate_items()
@@ -192,8 +191,7 @@ def _normalize_document(document, source_name: str, review_pages: set[int],
             last_header_part = None
             last_header_page = None
             parts.append(f"<!-- page: {page} -->")
-            # A figure is local uncertain evidence. Do not make otherwise
-            # selectable prose and tables on its entire page untrusted.
+            # A figure review marker should not cover unrelated page text
             page_review_open = page in review_pages
             if page_review_open:
                 reason = "ocr" if page in ocr_review_pages else "source-evidence"
@@ -233,8 +231,7 @@ def _normalize_document(document, source_name: str, review_pages: set[int],
             last_header_page = None
             continue
         if label in {"picture", "chart"}:
-            # Repeated logos and other small page furniture are often labelled
-            # as pictures. They are not missing semantic evidence.
+            # Repeated logos are page furniture rather than missing evidence
             if filter_visuals and page not in visual_review_pages:
                 continue
             picture_count += 1
@@ -315,18 +312,16 @@ def _normalize_document(document, source_name: str, review_pages: set[int],
 
 
 def parse_docling_pdf(path: Path, source_name: str) -> ParsedDocument:
-    # Import here so DOCX, CSV, and the lightweight PDF fallback work without ML dependencies.
+    # Load Docling only when this PDF backend is selected
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
     options = PdfPipelineOptions()
-    # Docling handles layout and tables. Raster OCR is supplemented afterward
-    # with the bounded local helper, which avoids Docling's unconditional OSD
-    # pass over sparse regions and preserves inspectable OCR conflicts.
+    # Local OCR checks sparse image text after Docling finds layout and tables
     options.do_ocr = False
     options.do_table_structure = True
-    # Device defaults to auto; CPU works without a GPU. Set DOCLING_DEVICE=cuda later.
+    # Auto device works on CPU and can use GPU when available
     converter = DocumentConverter(format_options={
         InputFormat.PDF: PdfFormatOption(pipeline_options=options)
     })
@@ -345,9 +340,7 @@ def parse_docling_pdf(path: Path, source_name: str) -> ParsedDocument:
             for info in page.get_image_info(hashes=True, xrefs=True)
         ]
         digest_counts = Counter(info.get("digest") for _, _, info in image_occurrences)
-        # Ignore images repeated throughout the document (the manual logo is
-        # present on all 175 pages) and tiny decorative assets. A unique image
-        # covering at least 2% of a page is conservatively substantive.
+        # Skip repeated logos and tiny decorative images
         visual_review_pages = {
             page_number
             for page_number, page_area, info in image_occurrences
@@ -357,11 +350,7 @@ def parse_docling_pdf(path: Path, source_name: str) -> ParsedDocument:
         cell_evidence, cell_warnings, cell_review_pages = _cell_loss_evidence(source, cell_losses)
         fidelity_evidence, fidelity_warnings, fidelity_review_pages = inspect_pdf_fidelity(source)
         chart_evidence = _chart_label_evidence(source, visual_review_pages)
-        # A selectable formula or chart label is still unsafe when it shares a
-        # page with visual evidence: symbol fidelity and spatial relationships
-        # are not verified by text extraction alone. Keep this page-level state
-        # distinct from ordinary image pages so surrounding prose on page 2
-        # remains trusted.
+        # Selected text does not verify formulas or chart relationships
     for item, _ in document.iterate_items():
         label = str(getattr(getattr(item, "label", ""), "value", getattr(item, "label", ""))).lower()
         provenance = getattr(item, "prov", None) or []

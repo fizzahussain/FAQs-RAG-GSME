@@ -43,9 +43,7 @@ def inspect_pdf_fidelity(document: fitz.Document, max_ocr_regions: int = 8):
             if not reason:
                 continue
             source_box = fitz.Rect(block[:4])
-            # Incomplete selectable formulas often occupy only the left edge
-            # of an image-backed equation. Preserve the surrounding visual
-            # region, including a possible fraction bar and denominator.
+            # Check the full equation region around incomplete text
             region = (fitz.Rect(source_box.x0 - 5, source_box.y0 - 5,
                                 min(page.rect.x1, source_box.x1 + 250),
                                 min(page.rect.y1, source_box.y1 + 14))

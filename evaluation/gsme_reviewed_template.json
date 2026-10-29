@@ -1,0 +1,5 @@
+{
+  "source": "source_reviewed",
+  "cases": [],
+  "instructions": "Add supervisor-reviewed question, tenant_id and expected_chunk_ids from approved source evidence only. Leave empty until reviewed."
+}

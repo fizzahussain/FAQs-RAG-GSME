@@ -12,7 +12,7 @@ class ParseWarning:
 
 @dataclass(slots=True)
 class EvidenceDiagnostic:
-    """Raw, unapproved source evidence; decisions live in a separate ledger."""
+    """Unreviewed source detail for a human to check"""
 
     evidence_id: str
     kind: str
@@ -26,6 +26,7 @@ class EvidenceDiagnostic:
 
 @dataclass(slots=True)
 class DocumentMetadata:
+    # Source hashes belong to the file and normalized Markdown
     source_id: str
     content_sha256: str
     normalized_sha256: str
@@ -83,6 +84,7 @@ def _extract_faq_question(
 
 @dataclass(slots=True)
 class MarkdownChunk:
+    # A chunk ID belongs to one parser and chunker output
     chunk_id: str
     index: int
     text: str
@@ -107,6 +109,7 @@ class MarkdownChunk:
 
     def __post_init__(self) -> None:
         if self.faq_question is None:
+            # Only recognized FAQ chunks get a question field
             self.faq_question = _extract_faq_question(
                 self.chunk_type, self.text, self.heading_path
             )
@@ -117,7 +120,7 @@ class MarkdownChunk:
 
 
 def chunk_to_record(chunk: MarkdownChunk) -> dict:
-    """Expose source evidence and location without repeating document diagnostics."""
+    """Return text and only the source fields this chunk has"""
     record = {
         "chunk_id": chunk.chunk_id,
         "index": chunk.index,
@@ -149,6 +152,7 @@ def chunk_to_record(chunk: MarkdownChunk) -> dict:
     record["evidence_status"] = chunk.evidence_status
     record["chunker_version"] = chunk.chunker_version
     if chunk.part_count > 1:
+        # Parts of one long source unit keep the same unit ID
         record.update(
             unit_id=chunk.unit_id,
             part_index=chunk.part_index,
