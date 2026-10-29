@@ -12,7 +12,7 @@ from gsme_rag.models import EvidenceDiagnostic, ParseWarning
 from gsme_rag.parsing.ocr import OcrUnavailable, ocr_image
 
 
-_BAD_UNICODE = re.compile(r"[\uFFFD\uE000-\uF8FF\x00]")
+_BAD_UNICODE = re.compile(r"[\uFFFD\uE000-\uF8FF\U000F0000-\U000FFFFD\U00100000-\U0010FFFD\x00]")
 _UNMAPPED_CID = re.compile(r"\(cid:\d+\)", re.I)
 _MATH_SYMBOLS = re.compile(r"[=×÷±≤≥∑∏√̅̿⋅δσμ]")
 _BROKEN_SEQUENCE = re.compile(r"=\s*\(\s*$|[=+−-]\s*$|\(\s*\)|\b(?:nan|undefined)\b", re.I)
@@ -50,16 +50,14 @@ def inspect_pdf_fidelity(document: fitz.Document, max_ocr_regions: int = 8):
                       if _BROKEN_SEQUENCE.search(raw) else source_box)
             bbox = tuple(round(float(value), 2) for value in region)
             alternate = None
-            important_layout = bool(re.search(r"\b(?:yield|control limits)\b", raw, re.I))
-            if (ocr_count < max_ocr_regions or important_layout) and ("=" in raw or _BAD_UNICODE.search(raw)):
+            if ocr_count < max_ocr_regions and ("=" in raw or _BAD_UNICODE.search(raw)):
                 ocr_region = fitz.Rect(bbox) + (-4, -4, 4, 4)
                 try:
                     pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=ocr_region, alpha=False)
                     alternate = ocr_image(pix.tobytes("png")) or None
                 except (OcrUnavailable, ValueError):
                     pass
-                if not important_layout:
-                    ocr_count += 1
+                ocr_count += 1
                 if alternate and re.sub(r"\s+", "", alternate) != re.sub(r"\s+", "", raw):
                     reason += "; selectable text and local OCR disagree"
             digest = hashlib.sha256(

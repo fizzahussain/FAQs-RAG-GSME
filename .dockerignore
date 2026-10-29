@@ -1,8 +1,16 @@
+.git
 .venv
+.env
+.env.*
+!.env.example
+data
+validation
+_deps
+*.zip
 __pycache__
 *.pyc
 *.egg-info
-.git
+build
 tests
 docs
 examples

@@ -9,17 +9,17 @@ class Settings:
     qdrant_url: str
     data_dir: Path
     collection: str = "gsme_evidence_v1"
-    dimension: int = 1024
-    max_tokens: int = 8192
+    dimension: int = 1024  # Must match the provider output and Qdrant collection.
+    max_tokens: int = 8192  # Embedding token budget; separate from the chunk character limit.
     batch_size: int = 16
     worker_batch: int = 8
-    lease_seconds: int = 300
+    lease_seconds: int = 300  # A worker heartbeats this lease while a long task runs.
     hybrid_enabled: bool = False
 
     def __post_init__(self):
-        if self.dimension < 1 or not 1 <= self.batch_size <= 96 or not 1 <= self.worker_batch <= 64:
+        if not 1 <= self.dimension <= 2048 or not 1 <= self.batch_size <= 96 or not 1 <= self.worker_batch <= 64:
             raise ValueError("Invalid dimension or bounded worker batch size")
-        if self.max_tokens < 1 or self.lease_seconds < 30:
+        if not 1 <= self.max_tokens <= 128000 or self.lease_seconds < 30:
             raise ValueError("Invalid token budget or lease")
 
 

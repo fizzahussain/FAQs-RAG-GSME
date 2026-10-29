@@ -16,7 +16,7 @@ def parse_csv_to_markdown(
     warnings: list[ParseWarning] = []
 
     with input_path.open("r", encoding="utf-8-sig", newline="") as source:
-        reader = csv.reader(source)
+        reader = csv.reader(source, strict=True)
         nonempty = []
         while True:
             # Keep the first physical line when a quoted cell spans several lines

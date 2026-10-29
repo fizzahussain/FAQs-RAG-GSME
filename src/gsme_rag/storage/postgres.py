@@ -3,6 +3,7 @@
 from datetime import date
 from pathlib import Path
 import json
+import csv
 import re
 from uuid import UUID, uuid4, uuid5
 
@@ -12,7 +13,9 @@ from psycopg.rows import dict_row
 from gsme_rag.chunking.chunker import CHUNKER_VERSION
 from gsme_rag.models import MarkdownChunk
 from gsme_rag.storage.files import checksum, save_original
-from gsme_rag.parsing.schedules import resolve_schedule_kind
+from gsme_rag.parsing.schedules import resolve_schedule_kind, is_schedule_header
+from gsme_rag.version import PARSER_VERSION
+from gsme_rag.parsing.profile import source_profile
 
 
 POINT_NAMESPACE = UUID("09e8281a-b989-43ae-ac31-f6b6990f3a14")
@@ -26,7 +29,7 @@ def _page_warning_codes(parsed, chunk: MarkdownChunk) -> list[str]:
     codes = {
         warning.code
         for warning in parsed.warnings
-        if (match := re.fullmatch(r"page (\d+)", warning.location or ""))
+        if (match := re.match(r"page (\d+)(?:\b|;)", warning.location or ""))
         and chunk.source_page_start <= int(match.group(1)) <= last
     }
     return sorted(codes)
@@ -37,14 +40,17 @@ class EvidenceStore:
         self.database_url = database_url
 
     def connect(self):
-        return psycopg.connect(self.database_url, row_factory=dict_row)
+        return psycopg.connect(self.database_url, row_factory=dict_row, connect_timeout=10)
 
-    def migrate(self, root: Path) -> list[str]:
+    def migrate(self) -> list[str]:
         applied = []
-        migrations = sorted((root / "migrations").glob("[0-9][0-9][0-9]_*.sql"))
+        # SQL travels with the package, so wheel installs can migrate too.
+        directory = Path(__file__).with_name("migrations")
+        migrations = sorted(directory.glob("[0-9][0-9][0-9]_*.sql"))
         if not migrations:
             raise ValueError("No SQL migrations found in the project folder")
         with self.connect() as db:
+            db.execute("SELECT pg_advisory_xact_lock(644081525)")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
             )
@@ -59,14 +65,14 @@ class EvidenceStore:
         return applied
 
     @staticmethod
-    def _same_source_version(db, document_id, digest: str, schedule_kind: str | None):
+    def _same_source_version(db, document_id, digest: str, schedule_kind: str | None, profile: dict):
         # The digest belongs to a version and never becomes the document ID
         return db.execute(
             """SELECT id, state FROM document_versions
             WHERE document_id=%s AND source_sha256=%s AND parser_version=%s
-              AND chunker_version=%s AND schedule_kind IS NOT DISTINCT FROM %s
+              AND chunker_version=%s AND schedule_kind IS NOT DISTINCT FROM %s AND parse_options=%s::jsonb
             ORDER BY created_at DESC LIMIT 1""",
-            (document_id, digest, "0.14.7", CHUNKER_VERSION, schedule_kind),
+            (document_id, digest, PARSER_VERSION, CHUNKER_VERSION, schedule_kind, json.dumps(profile)),
         ).fetchone()
 
     def submit(
@@ -91,15 +97,22 @@ class EvidenceStore:
             raise ValueError("Tenant and a supported file are required")
         if schedule_kind not in (None, "full", "shared"):
             raise ValueError("schedule_kind must be full or shared")
+        if not source.is_file() or source.is_symlink():
+            raise ValueError("Source must be a regular local file")
+        is_schedule = False
         if source.suffix.lower() == ".csv":
+            with source.open("r", encoding="utf-8-sig", newline="") as incoming:
+                header = next((row for row in csv.reader(incoming, strict=True)
+                               if any(value.strip() for value in row)), [])
+            is_schedule = is_schedule_header(header)
+        if is_schedule:
             schedule_kind = resolve_schedule_kind(source.name, schedule_kind)
             if not schedule_kind:
                 raise ValueError("Schedule CSV needs Full or Shared selection")
         elif schedule_kind:
             raise ValueError("Full/Shared is only for schedule CSVs")
-        if not source.is_file() or source.is_symlink():
-            raise ValueError("Source must be a regular local file")
         logical_id = UUID(document_id) if document_id else uuid4()
+        profile = source_profile(source)
         if document_id:
             # Check unchanged bytes before copying a large file again
             digest = checksum(source)
@@ -109,7 +122,7 @@ class EvidenceStore:
                 ).fetchone()
                 if not owned:
                     raise ValueError("Document does not belong to this tenant")
-                previous = self._same_source_version(db, logical_id, digest, schedule_kind)
+                previous = self._same_source_version(db, logical_id, digest, schedule_kind, profile)
                 if previous and previous["state"] not in ("failed", "superseded"):
                     return {
                         "document_id": str(logical_id),
@@ -136,7 +149,7 @@ class EvidenceStore:
                         (logical_id, tenant_id),
                     )
                 # Repeat the check under the document lock for concurrent submissions
-                previous = self._same_source_version(db, logical_id, digest, schedule_kind)
+                previous = self._same_source_version(db, logical_id, digest, schedule_kind, profile)
                 if previous and previous["state"] not in ("failed", "superseded"):
                     return {
                         "document_id": str(logical_id),
@@ -147,20 +160,21 @@ class EvidenceStore:
                 db.execute(
                     """INSERT INTO document_versions
                     (id,document_id,parser_version,chunker_version,normalized_sha256,artifact_path,
-                     state,source_sha256,source_file,original_path,document_class,schedule_kind)
-                    VALUES (%s,%s,%s,%s,%s,%s,'queued',%s,%s,%s,%s,%s)""",
+                     state,source_sha256,source_file,original_path,document_class,schedule_kind,parse_options)
+                    VALUES (%s,%s,%s,%s,%s,%s,'queued',%s,%s,%s,%s,%s,%s)""",
                     (
                         version_id,
                         logical_id,
-                        "0.14.7",
+                        PARSER_VERSION,
                         CHUNKER_VERSION,
                         "0" * 64,
                         "",
                         digest,
                         source.name,
                         str(saved),
-                        "schedule" if source.suffix.lower() == ".csv" else "document",
+                        "schedule" if is_schedule else "document",
                         schedule_kind,
+                        json.dumps(profile),
                     ),
                 )
                 job_id = uuid4()
@@ -197,13 +211,16 @@ class EvidenceStore:
                 {k: str(v) if isinstance(v, UUID) else v for k, v in row.items()} if row else None
             )
 
-    def inspect_version(self, tenant_id: str, version_id: str, limit: int = 50) -> dict | None:
-        if not 1 <= limit <= 100:
-            raise ValueError("Inspection limit must be between 1 and 100")
+    def inspect_version(self, tenant_id: str, version_id: str, limit: int = 50,
+                        offset: int = 0) -> dict | None:
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError("Inspection limit must be between 1 and 100; offset must be nonnegative")
         with self.connect() as db:
             version = db.execute(
                 """SELECT v.id,v.document_id,v.source_file,v.source_sha256,v.state,
-                v.artifact_path,v.original_path,v.document_class,v.schedule_kind
+                v.artifact_path,v.original_path,v.document_class,v.schedule_kind,
+                v.parser_version,v.chunker_version,v.normalized_sha256,v.parse_options,
+                (d.current_version_id=v.id) AS is_current
                 FROM document_versions v JOIN documents d ON d.id=v.document_id
                 WHERE d.tenant_id=%s AND v.id=%s""",
                 (tenant_id, version_id),
@@ -213,15 +230,23 @@ class EvidenceStore:
             chunks = db.execute(
                 """SELECT c.source_chunk_id,c.evidence_text,c.source_page_start,
                 c.source_page_end,c.source_anchor,c.warning_codes,c.parser_backend,
-                c.category,c.chunk_type,c.review_required,c.evidence_status,
+                c.category,c.chunk_type,c.review_required,c.evidence_status,c.heading_path,
+                c.chunk_index,c.unit_id,c.part_index,c.part_count,
+                COALESCE((SELECT jsonb_agg(jsonb_build_object('model_version',j.model_version,
+                  'collection',j.collection_name,'state',j.state,'last_error',j.last_error,
+                  'retryable',j.retryable,'attempts',j.attempt_count,'next_attempt_at',j.next_attempt_at))
+                  FROM index_jobs j WHERE j.chunk_id=c.id),'[]'::jsonb) AS index_jobs,
                 r.decision AS latest_decision,r.source_verified,r.reviewer
                 FROM evidence_chunks c LEFT JOIN LATERAL (
                     SELECT decision,source_verified,reviewer FROM review_decisions
                     WHERE chunk_id=c.id ORDER BY decision_order DESC LIMIT 1) r ON true
-                WHERE c.version_id=%s ORDER BY c.created_at,c.id LIMIT %s""",
-                (version_id, limit),
+                WHERE c.version_id=%s ORDER BY c.chunk_index NULLS LAST,c.created_at,c.id LIMIT %s OFFSET %s""",
+                (version_id, limit, offset),
             ).fetchall()
-            return {"version": version, "chunks": chunks,
+            total = db.execute("SELECT count(*) AS count FROM evidence_chunks WHERE version_id=%s",
+                               (version_id,)).fetchone()["count"]
+            return {"version": version, "chunks": chunks, "total_chunks": total,
+                    "offset": offset, "next_offset": offset + limit if offset + limit < total else None,
                     "review_manifest_path": str(Path(version["artifact_path"]).with_name(
                         "review_manifest.json")) if version["artifact_path"] else None}
 
@@ -231,12 +256,13 @@ class EvidenceStore:
         with self.connect() as db:
             return db.execute(
                 """SELECT v.id, v.document_id, v.source_file, v.source_sha256,
-                   v.state, v.created_at, v.document_class,
+                   v.state, v.created_at, v.document_class,j.id AS job_id,
                    (d.current_version_id = v.id) AS is_current,
                    (SELECT count(*) FROM evidence_chunks c WHERE c.version_id=v.id) AS chunks,
                    (SELECT count(*) FROM evidence_chunks c WHERE c.version_id=v.id
                     AND c.evidence_status='approved') AS approved_chunks
                    FROM document_versions v JOIN documents d ON d.id=v.document_id
+                   LEFT JOIN ingestion_jobs j ON j.version_id=v.id
                    WHERE d.tenant_id=%s ORDER BY v.created_at DESC, v.id DESC LIMIT %s""",
                 (tenant_id, limit),
             ).fetchall()
@@ -301,7 +327,8 @@ class EvidenceStore:
         with self.connect() as db:
             row = db.execute(
                 """SELECT j.id,j.attempts,j.tenant_id,j.document_id,j.version_id,v.original_path,
-                     v.source_file,v.schedule_kind,v.source_sha256,v.document_class
+                     v.source_file,v.schedule_kind,v.source_sha256,v.document_class,v.parse_options,
+                     v.parser_version,v.chunker_version
                 FROM ingestion_jobs j JOIN document_versions v ON v.id=j.version_id
                 WHERE (j.id=%s::uuid OR %s::uuid IS NULL)
                   AND (j.state='queued' OR (j.state='running' AND
@@ -404,8 +431,9 @@ class EvidenceStore:
                     """INSERT INTO evidence_chunks(id,version_id,source_chunk_id,
                         source_page_start,source_page_end,heading_path,warning_codes,chunk_type,
                         evidence_status,review_required,evidence_text,source_anchor,parser_backend,
-                        parser_version,chunker_version,category,faq_question,table_row_number)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        parser_version,chunker_version,category,faq_question,table_row_number,
+                        chunk_index,unit_id,part_index,part_count)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         (
                             str(uuid5(POINT_NAMESPACE, f"{version_id}|{chunk.chunk_id}")),
@@ -426,6 +454,10 @@ class EvidenceStore:
                             chunk.category,
                             chunk.faq_question,
                             chunk.table_row_number,
+                            chunk.index,
+                            chunk.unit_id,
+                            chunk.part_index,
+                            chunk.part_count,
                         )
                         for chunk in chunks
                     ),
@@ -502,6 +534,11 @@ class EvidenceStore:
             raise ValueError("Source verification is required for indexing")
         # Lock the chunk so indexing cannot race a changed review decision
         with self.connect() as db:
+            # All publication/review operations lock the document before its chunks.
+            # Matching the worker's lock order avoids deadlocks during revocation.
+            db.execute("""SELECT d.id FROM documents d JOIN document_versions v ON v.document_id=d.id
+                       WHERE d.tenant_id=%s AND v.id=%s FOR UPDATE OF d""",
+                       (tenant_id, version_id)).fetchone()
             row = db.execute(
                 """SELECT c.id,c.evidence_text,c.evidence_status,d.current_version_id
                 FROM evidence_chunks c JOIN document_versions v ON v.id=c.version_id
@@ -528,7 +565,7 @@ class EvidenceStore:
             if row["current_version_id"] == UUID(version_id):
                 if decision == "approved":
                     db.execute(
-                        "UPDATE index_jobs SET state='queued',next_attempt_at=now() WHERE chunk_id=%s AND state='superseded'",
+                        "UPDATE index_jobs SET state='queued',retryable=true,attempt_count=0,next_attempt_at=now() WHERE chunk_id=%s AND state='superseded'",
                         (row["id"],),
                     )
                 else:
@@ -548,7 +585,7 @@ class EvidenceStore:
             version = db.execute(
                 """SELECT v.id FROM document_versions v JOIN documents d ON d.id=v.document_id
                 WHERE d.tenant_id=%s AND d.id=%s AND v.id=%s AND v.document_class='document'
-                  AND v.state IN ('review_needed','approved','indexing','indexed')""",
+                  AND v.state IN ('review_needed','approved','indexing','indexed') FOR UPDATE OF d""",
                 (tenant_id, document_id, version_id),
             ).fetchone()
             if not version:
@@ -583,8 +620,11 @@ class EvidenceStore:
                 db.execute(
                     """INSERT INTO index_jobs(id,chunk_id,model_version,point_id,state,collection_name)
                     VALUES (%s,%s,%s,%s,'queued',%s) ON CONFLICT (chunk_id,model_version) DO UPDATE
-                    SET state=CASE WHEN index_jobs.state='indexed' THEN 'indexed' ELSE 'queued' END,
-                        last_error=NULL,next_attempt_at=now()""",
+                    SET state=CASE WHEN index_jobs.state IN ('indexed','indexing')
+                              THEN index_jobs.state ELSE 'queued' END,
+                        attempt_count=CASE WHEN index_jobs.state IN ('failed','superseded')
+                                      THEN 0 ELSE index_jobs.attempt_count END,
+                        retryable=true,last_error=NULL,next_attempt_at=now()""",
                     (uuid4(), item["id"], model_version, point_id, collection_name),
                 )
             return len(approved)
@@ -611,6 +651,7 @@ class EvidenceStore:
                   AND (%s::text IS NULL OR d.tenant_id=%s)
                    AND (%s::uuid IS NULL OR v.id=%s::uuid)
                   AND j.state IN ('queued','failed','indexing')
+                  AND j.retryable AND j.attempt_count < 5
                   AND (j.state!='indexing' OR j.claimed_at < now()-(%s*interval '1 second'))
                   AND j.next_attempt_at <= now() ORDER BY j.updated_at
                 LIMIT %s FOR UPDATE OF j SKIP LOCKED""",
@@ -649,14 +690,15 @@ class EvidenceStore:
                 ).fetchone()
             )
 
-    def index_done(self, job_id, attempt_count: int, *, error: str | None = None):
+    def index_done(self, job_id, attempt_count: int, *, error: str | None = None,
+                   retryable: bool = True):
         with self.connect() as db:
             if error:
                 db.execute(
-                    """UPDATE index_jobs SET state='failed',last_error=%s,claimed_at=NULL,
+                    """UPDATE index_jobs SET state='failed',last_error=%s,retryable=%s,claimed_at=NULL,
                   next_attempt_at=now()+(LEAST(3600, POWER(2,LEAST(attempt_count,10))) * interval '1 second'),
                   updated_at=now() WHERE id=%s AND attempt_count=%s AND state='indexing'""",
-                    (error[:500], job_id, attempt_count),
+                    (error[:500], retryable, job_id, attempt_count),
                 )
             else:
                 db.execute(
@@ -664,6 +706,18 @@ class EvidenceStore:
                   updated_at=now() WHERE id=%s AND attempt_count=%s AND state='indexing'""",
                     (job_id, attempt_count),
                 )
+
+    def mark_indexed_versions(self, version_ids: list):
+        # Run after job-completion transactions release their locks. Publication
+        # locks the version before its jobs, so reversing that order can deadlock.
+        with self.connect() as db:
+            db.execute("""UPDATE document_versions v SET state='indexed'
+                WHERE v.id=ANY(%s) AND v.state IN ('approved','indexing','indexed')
+                  AND EXISTS (SELECT 1 FROM index_jobs j JOIN evidence_chunks c ON c.id=j.chunk_id
+                              WHERE c.version_id=v.id AND j.state='indexed')
+                  AND NOT EXISTS (SELECT 1 FROM index_jobs j JOIN evidence_chunks c ON c.id=j.chunk_id
+                                  WHERE c.version_id=v.id AND j.state IN ('queued','indexing','failed'))""",
+                (version_ids,))
 
     def allowed_hits(
         self, tenant_id: str, point_ids: list[str], model_version: str, collection_name: str
@@ -674,13 +728,41 @@ class EvidenceStore:
             rows = db.execute(
                 """SELECT j.point_id,c.evidence_text,c.source_chunk_id,
                  c.source_page_start,c.source_page_end,c.category,c.table_row_number,
-                 c.document_id,c.version_id,c.source_file,c.source_sha256
+                 c.document_id,c.version_id,c.source_file,c.source_sha256,c.heading_path,
+                 c.faq_question,c.unit_id,c.part_index,c.part_count,c.review_required,
+                 c.parser_backend,c.parser_version,c.chunker_version
                  FROM approved_current_evidence c JOIN index_jobs j ON j.chunk_id=c.id
                  WHERE c.tenant_id=%s AND j.point_id=ANY(%s) AND j.model_version=%s
                    AND j.collection_name=%s AND j.state='indexed'""",
                 (tenant_id, [UUID(i) for i in point_ids], model_version, collection_name),
             ).fetchall()
             return {str(row["point_id"]): row for row in rows}
+
+    def has_indexed_evidence(self, tenant_id: str, model_version: str, collection_name: str) -> bool:
+        with self.connect() as db:
+            return bool(db.execute("""SELECT 1 FROM approved_current_evidence c
+                JOIN index_jobs j ON j.chunk_id=c.id WHERE c.tenant_id=%s
+                AND j.model_version=%s AND j.collection_name=%s AND j.state='indexed' LIMIT 1""",
+                (tenant_id, model_version, collection_name)).fetchone())
+
+    def indexed_points(self, tenant_id: str, version_id: str, model_version: str,
+                       collection_name: str, after=None) -> list[dict]:
+        with self.connect() as db:
+            return db.execute("""SELECT j.id,j.point_id FROM index_jobs j
+                JOIN approved_current_evidence c ON c.id=j.chunk_id
+                WHERE c.tenant_id=%s AND c.version_id=%s AND j.model_version=%s
+                  AND j.collection_name=%s AND j.state='indexed'
+                  AND (%s::uuid IS NULL OR j.id>%s::uuid) ORDER BY j.id LIMIT 100""",
+                (tenant_id, version_id, model_version, collection_name, after, after)).fetchall()
+
+    def requeue_missing_points(self, job_ids: list) -> int:
+        if not job_ids:
+            return 0
+        with self.connect() as db:
+            return db.execute("""UPDATE index_jobs SET state='queued',attempt_count=0,retryable=true,
+                last_error='missing_derived_point',next_attempt_at=now(),updated_at=now()
+                WHERE id=ANY(%s) AND state='indexed'
+                  AND chunk_id IN (SELECT id FROM approved_current_evidence)""", (job_ids,)).rowcount
 
     def schedules(
         self,

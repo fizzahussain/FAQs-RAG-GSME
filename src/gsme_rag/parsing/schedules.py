@@ -77,8 +77,8 @@ def _date(value: str, row_number: int, column: str) -> date:
 def parse_schedule_records(path: str | Path) -> list[dict]:
     """Validate the known schedule schema and retain each CSV source row."""
     with Path(path).open("r", encoding="utf-8-sig", newline="") as source:
-        reader = csv.reader(source)
-        raw_headers = next(reader, [])
+        reader = csv.reader(source, strict=True)
+        raw_headers = next((row for row in reader if any(value.strip() for value in row)), [])
         headings = [normalize_schedule_header(name) for name in raw_headers]
         while headings and not headings[-1]:
             headings.pop()
@@ -105,7 +105,8 @@ def parse_schedule_records(path: str | Path) -> list[dict]:
                 raise ValueError(f"row {row_number}: more cells than column names")
             row = dict(zip(headings, [value.strip() for value in raw[:len(headings)]], strict=False))
             row = {name: row.get(name, "") for name in SCHEDULE_COLUMNS}
-            if not row["technology_nm"].isdigit():
+            if (not re.fullmatch(r"[0-9]+", row["technology_nm"])
+                    or int(row["technology_nm"]) > 2_147_483_647):
                 raise ValueError(f"row {row_number}: technology_nm must be a whole number")
             if not row["flavor"]:
                 raise ValueError(f"row {row_number}: flavor is required")

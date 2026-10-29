@@ -6,7 +6,9 @@ NUMBERED_QUESTION = re.compile(r"^\s*(\d{1,3})[.)]?\s+(.+)$")
 
 
 def normalize_inline(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text)
+    # Compatibility normalization turns x² into x2 and changes technical meaning.
+    # NFC joins equivalent accent sequences while retaining symbols and exponents.
+    text = unicodedata.normalize("NFC", text)
     text = text.replace("\u00a0", " ")
     return re.sub(r"[ \t]+", " ", text).strip()
 

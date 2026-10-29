@@ -22,14 +22,24 @@ def _parse_command(args: argparse.Namespace) -> int:
     args.output.write_text(result.markdown, encoding="utf-8")
     sidecar = args.output.with_suffix(".metadata.json")
     sidecar.write_text(json.dumps(asdict(result.metadata), indent=2), encoding="utf-8")
+    review = args.output.with_suffix(".review.json")
+    review.write_text(json.dumps({
+        "strategy_used": result.strategy_used,
+        "metadata": asdict(result.metadata),
+        "warnings": [asdict(item) for item in result.warnings],
+        "evidence_diagnostics": [asdict(item) for item in result.evidence_diagnostics],
+    }, indent=2), encoding="utf-8")
     print(f"Normalized {args.input.name} to {args.output}")
     print(f"Source metadata written to {sidecar}")
+    print(f"Warnings and source diagnostics written to {review}")
     return 0
 
 
 def _chunk_command(args: argparse.Namespace) -> int:
     markdown = args.input.read_text(encoding="utf-8")
     sidecar = args.metadata or args.input.with_suffix(".metadata.json")
+    if args.metadata and not sidecar.is_file():
+        raise ValueError("The explicitly requested metadata sidecar does not exist")
     metadata = DocumentMetadata(**json.loads(sidecar.read_text(encoding="utf-8"))) if sidecar.exists() else None
     result = chunk_markdown(
         markdown, metadata.source_file if metadata else args.input.name,
@@ -43,6 +53,7 @@ def _chunk_command(args: argparse.Namespace) -> int:
         "strategy": args.strategy,
         "overlap_chars": args.overlap_chars if args.strategy in {"auto", "hybrid"} else 0,
         "chunk_count": len(result.chunks),
+        "content_route": result.content_route,
         "chunks": [chunk_to_record(chunk) for chunk in result.chunks],
         "warnings": [asdict(warning) for warning in result.warnings],
     }

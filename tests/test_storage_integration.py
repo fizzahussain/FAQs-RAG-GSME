@@ -32,7 +32,7 @@ class StorageIntegrationTests(TestCase):
             DB, QDRANT, Path(self.temp.name), collection="gsme_it_" + uuid4().hex[:12], dimension=32
         )
         self.store = EvidenceStore(DB)
-        self.store.migrate(self.root)
+        self.store.migrate()
         self.provider = FakeEmbeddings(32)
         self.vectors = QdrantEvidence(QDRANT, self.settings.collection, 32)
         self.tenant = "test-" + uuid4().hex
@@ -209,6 +209,7 @@ class StorageIntegrationTests(TestCase):
         self.assertEqual(process_index(self.store, self.vectors, self.provider,
                                        self.settings, self.tenant)["indexed"], 0)
         self.assertEqual(self.provider.calls, 0)
+
         with self.store.connect() as db:
             chunk_id = db.execute("SELECT source_chunk_id FROM evidence_chunks WHERE version_id=%s",
                                   (submitted["version_id"],)).fetchone()["source_chunk_id"]
@@ -217,6 +218,82 @@ class StorageIntegrationTests(TestCase):
         self.assertEqual(process_index(self.store, self.vectors, self.provider,
                                        self.settings, self.tenant)["indexed"], 0)
         self.assertEqual(self.provider.calls, 0)
+
+    def test_source_order_pagination_and_immutable_reviewed_evidence(self):
+        from docx import Document
+        import psycopg
+
+        source = Path(self.temp.name) / "many.docx"
+        document = Document()
+        for index in range(105):
+            document.add_heading(f"What is source item {index}?", level=2)
+            document.add_paragraph(f"The source answer is item {index}.")
+        document.save(source)
+        submitted = self.store.submit(self.tenant, source, self.settings.data_dir)
+        self.assertEqual(process_ingestion(self.store, self.settings, submitted["job_id"])["chunks"], 105)
+        first = self.store.inspect_version(self.tenant, submitted["version_id"], 100)
+        last = self.store.inspect_version(self.tenant, submitted["version_id"], 100, first["next_offset"])
+        self.assertEqual([chunk["chunk_index"] for chunk in first["chunks"] + last["chunks"]], list(range(105)))
+        self.assertEqual(first["total_chunks"], 105)
+        self.assertIsNone(last["next_offset"])
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.store.connect() as db:
+                db.execute("UPDATE evidence_chunks SET evidence_text='changed' WHERE version_id=%s",
+                           (submitted["version_id"],))
+
+    def test_bad_candidate_does_not_block_healthy_indexing(self):
+        from dataclasses import replace
+        from docx import Document
+
+        source = Path(self.temp.name) / "mixed.docx"
+        document = Document()
+        document.add_heading("What is the long answer?", 2)
+        document.add_paragraph("synthetic lengthy detail " * 30)
+        document.add_heading("What is short?", 2)
+        document.add_paragraph("A short answer.")
+        document.save(source)
+        submitted = self.store.submit(self.tenant, source, self.settings.data_dir)
+        process_ingestion(self.store, self.settings, submitted["job_id"])
+        chunks = self.store.inspect_version(self.tenant, submitted["version_id"])["chunks"]
+        for chunk in chunks:
+            self.store.record_review(self.tenant, submitted["version_id"], chunk["source_chunk_id"],
+                                     "approved", "synthetic", "Compared generated source", True)
+        self.store.publish(self.tenant, submitted["document_id"], submitted["version_id"],
+                           self.provider.model_version, self.vectors.collection)
+        result = process_index(self.store, self.vectors, self.provider,
+                               replace(self.settings, max_tokens=30), self.tenant, submitted["version_id"])
+        self.assertEqual((result["indexed"], result["failed"]), (1, 1), result)
+        with self.store.connect() as db:
+            bad = db.execute("SELECT retryable,last_error FROM index_jobs WHERE state='failed' AND chunk_id IN "
+                             "(SELECT id FROM evidence_chunks WHERE version_id=%s)",
+                             (submitted["version_id"],)).fetchone()
+        self.assertFalse(bad["retryable"])
+        self.assertIn("budget", bad["last_error"])
+        self.assertEqual(process_index(self.store, self.vectors, self.provider,
+                                      self.settings, self.tenant, submitted["version_id"])["indexed"], 0)
+
+    def test_generic_faq_csv_is_a_document_and_parser_upgrade_creates_new_version(self):
+        source = Path(self.temp.name) / "questions.csv"
+        source.write_text("Question,Answer\nWhat is Muse?,Semiconductor services.\n", encoding="utf-8")
+        first = self.store.submit(self.tenant, source, self.settings.data_dir)
+        self.assertEqual(process_ingestion(self.store, self.settings, first["job_id"])["state"], "review_needed")
+        with patch("gsme_rag.storage.postgres.PARSER_VERSION", "next-parser-version"):
+            second = self.store.submit(self.tenant, source, self.settings.data_dir, first["document_id"])
+        self.assertFalse(second["no_op"])
+        self.assertNotEqual(first["version_id"], second["version_id"])
+
+    def test_missing_derived_point_can_be_repaired_without_changing_approval(self):
+        from gsme_rag.storage.pipeline import repair_missing_vectors
+        first = self._approved_faq()
+        point = self.store.approved_point(self.tenant, first["version_id"], first["chunk_id"],
+                                         self.provider.model_version, self.vectors.collection)
+        self.vectors.delete([str(point["point_id"])])
+        self.assertEqual(repair_missing_vectors(self.store, self.vectors, self.provider.model_version,
+                                                self.tenant, first["version_id"]), 1)
+        result = process_index(self.store, self.vectors, self.provider, self.settings,
+                               self.tenant, first["version_id"])
+        self.assertEqual(result["indexed"], 1)
+        self.assertIn(str(point["point_id"]), self.vectors.existing([str(point["point_id"])]))
 
     def test_schedule_write_failure_does_not_partially_publish(self):
         source = Path(self.temp.name) / "full_schedules.csv"

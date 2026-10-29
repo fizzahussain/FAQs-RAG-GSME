@@ -29,9 +29,24 @@ def find_tesseract() -> str | None:
     return None
 
 
+def tesseract_environment() -> dict:
+    """Check the same executable and language configuration used by OCR."""
+    command = find_tesseract()
+    languages = []
+    if command:
+        try:
+            result = subprocess.run([command, "--list-langs"], capture_output=True,
+                                    text=True, timeout=5, check=False)
+            if result.returncode == 0:
+                languages = [line.strip() for line in result.stdout.splitlines()[1:] if line.strip()]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return {"executable": command, "languages": languages, "english_available": "eng" in languages}
+
+
 def _run_tesseract(command: str, image_bytes: bytes) -> str:
     process = subprocess.run(
-        [command, "stdin", "stdout", "--psm", "6"], input=image_bytes,
+        [command, "stdin", "stdout", "-l", "eng", "--psm", "6"], input=image_bytes,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45, check=False,
     )
     if process.returncode:

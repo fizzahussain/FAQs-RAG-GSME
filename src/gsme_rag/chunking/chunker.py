@@ -3,8 +3,9 @@ import hashlib
 import re
 
 from gsme_rag.models import ChunkResult, DocumentMetadata, MarkdownChunk, ParseWarning
-from gsme_rag.parsing.markdown import normalize_control_markers
+from gsme_rag.parsing.markdown import normalize_control_markers, split_table_row
 from gsme_rag.parsing.schedules import is_schedule_header, resolve_schedule_kind
+from gsme_rag.version import CHUNKER_VERSION
 
 
 PAGE_MARKER = re.compile(r"^<!--\s*page:\s*(\d+)\s*-->$")
@@ -19,7 +20,6 @@ PAPER_HEADING = re.compile(
     r"conclusions?|references|related work|materials(?: and methods)?|measurements?)\b",
     re.IGNORECASE,
 )
-CHUNKER_VERSION = "0.14.7"
 
 
 @dataclass(slots=True)
@@ -68,6 +68,20 @@ def _parse_blocks(markdown: str) -> list[_Block]:
         stripped = lines[index].strip()
         if not stripped:
             index += 1
+            continue
+
+        fence = re.match(r"^(`{3,}|~{3,})", stripped)
+        if fence:
+            code_lines = [lines[index]]
+            marker = fence.group(1)
+            index += 1
+            while index < len(lines):
+                code_lines.append(lines[index])
+                index += 1
+                if re.fullmatch(re.escape(marker[0]) + "{" + str(len(marker)) + r",}\s*", code_lines[-1].strip()):
+                    break
+            blocks.append(_Block("code", "\n".join(code_lines), current_page, current_page,
+                                 review_required=review_depth > 0))
             continue
 
         page_match = PAGE_MARKER.match(stripped)
@@ -146,6 +160,8 @@ def _parse_blocks(markdown: str) -> list[_Block]:
                 break
             page_match = PAGE_MARKER.match(candidate)
             if page_match or HEADING.match(candidate) or _is_table_start(lines, index):
+                break
+            if re.match(r"^(?:`{3,}|~{3,})", candidate):
                 break
             if candidate.startswith("<!--") and candidate.endswith("-->"):
                 break
@@ -374,7 +390,9 @@ def _table_units(block: _Block, heading_path: list[str]) -> list[_Unit]:
         ]
 
     header = "\n".join(lines[:2])
-    header_cells = re.split(r"(?<!\\)\|", lines[0].strip().strip("|"))
+    raw_header_cells = [_plain_text(cell).strip("*_` ") for cell in split_table_row(lines[0])]
+    aliases = {"questions": "question", "answers": "answer", "q": "question", "a": "answer"}
+    header_cells = [aliases.get(value.casefold(), value.casefold()) for value in raw_header_cells]
     page_column = next(
         (index for index, value in enumerate(header_cells) if value.strip().casefold() == "page"),
         None,
@@ -394,8 +412,8 @@ def _table_units(block: _Block, heading_path: list[str]) -> list[_Unit]:
     units = []
     active_category: str | None = None
     for row_number, row in enumerate(lines[2:], start=block.first_data_row):
-        cells = re.split(r"(?<!\\)\|", row.strip().strip("|"))
-        cells = [re.sub(r"<br\s*/?>", "\n", cell.strip(), flags=re.I).replace("\\|", "|") for cell in cells]
+        cells = [re.sub(r"<br\s*/?>", "\n", cell, flags=re.I) for cell in split_table_row(row)]
+        malformed = len(cells) != len(header_cells) or len(set(header_cells)) != len(header_cells)
         page = block.page_start
         page_end = block.page_end
         if page_column is not None and page_column < len(cells):
@@ -404,7 +422,7 @@ def _table_units(block: _Block, heading_path: list[str]) -> list[_Unit]:
             if page_range:
                 page = int(page_range.group(1))
                 page_end = int(page_range.group(2) or page_range.group(1))
-        category = cells[category_column] if category_column is not None and category_column < len(cells) else None
+        category = _plain_text(cells[category_column]) if category_column is not None and category_column < len(cells) else None
         if (
             question_column is not None and answer_column is not None
             and question_column < len(cells) and answer_column < len(cells)
@@ -413,17 +431,24 @@ def _table_units(block: _Block, heading_path: list[str]) -> list[_Unit]:
             and not cells[question_column].strip().endswith("?")
         ):
             # Some exports use a question cell as a category separator
-            active_category = cells[question_column].strip()
+            active_category = _plain_text(cells[question_column])
             continue
         if not category:
             category = active_category
         is_faq = (
-            question_column is not None and answer_column is not None
+            not malformed and question_column is not None and answer_column is not None
             and question_column < len(cells) and answer_column < len(cells)
             and bool(cells[question_column])
         )
-        anchor = f"Question: {cells[question_column]}\n\nAnswer:" if is_faq else ""
+        anchor = f"Question: {_plain_text(cells[question_column])}\n\nAnswer:" if is_faq else ""
         body = cells[answer_column] if is_faq else f"{header}\n{row}"
+        if is_faq and body.strip():
+            # Notes, links and other source columns remain part of the answer evidence.
+            extra_fields = [f"{raw_header_cells[i]}: {cell}" for i, cell in enumerate(cells)
+                            if i not in {question_column, answer_column, category_column, page_column}
+                            and cell]
+            if extra_fields:
+                body += "\n\n" + "\n\n".join(extra_fields)
         units.append(_Unit(
             kind="table_row",
             body=body,
@@ -433,7 +458,7 @@ def _table_units(block: _Block, heading_path: list[str]) -> list[_Unit]:
             anchor=anchor,
             table_row_number=row_number,
             category=category,
-            review_required=block.review_required,
+            review_required=block.review_required or malformed,
         ))
     return units
 
@@ -443,10 +468,10 @@ def _split_generic_table_row(text: str, limit: int) -> list[str]:
     lines = text.splitlines()
     if len(lines) < 3 or len(text) <= limit:
         return [text]
-    headers = [cell.strip() for cell in re.split(r"(?<!\\)\|", lines[0].strip().strip("|"))]
-    values = [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", lines[-1].strip().strip("|"))]
+    headers = split_table_row(lines[0])
+    values = split_table_row(lines[-1])
     fields = [
-        f"{headers[index] or f'Column {index + 1}'}: {value}"
+        f"{(headers[index] if index < len(headers) else '') or f'Column {index + 1}'}: {value}"
         for index, value in enumerate(values) if value
     ]
     if not fields:
@@ -496,7 +521,10 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False,
     index = 0
     while index < len(blocks):
         block = blocks[index]
-        if block.kind == "heading":
+        heading_question = (block.kind == "heading" and bool(block.title)
+                            and block.title.endswith("?") and not block.review_required
+                            and faq_mode and not (selective and paper_section))
+        if block.kind == "heading" and not heading_question:
             flush_generic()
             level = block.level or 1
             heading_stack = [(depth, title) for depth, title in heading_stack if depth < level]
@@ -527,7 +555,30 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False,
             index += 1
             continue
 
-        if faq_mode and not (selective and paper_section) and not block.review_required and _is_question(block.text):
+        if block.kind == "code":
+            flush_generic()
+            units.append(_Unit("code", block.text, current_path(), block.page_start, block.page_end,
+                               review_required=block.review_required))
+            index += 1
+            continue
+
+        if block.text.startswith("Visual evidence on page") and "no verified description" in block.text:
+            flush_generic()
+            units.append(_Unit("visual_gap", block.text, current_path(), block.page_start, block.page_end,
+                               review_required=True))
+            index += 1
+            continue
+
+        if block.review_required and block.text.startswith(("Image text (OCR):", "Conflicting image OCR readings;")):
+            # Supplemental image evidence has its own source location; a later
+            # selectable section must not become the image's heading context.
+            flush_generic()
+            units.append(_Unit("section", block.text, [], block.page_start, block.page_end,
+                               review_required=True))
+            index += 1
+            continue
+
+        if faq_mode and not (selective and paper_section) and not block.review_required and (heading_question or _is_question(block.text)):
             flush_generic()
             answer_blocks: list[_Block] = []
             next_index = index + 1
@@ -571,7 +622,7 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False,
             units.append(
                 _Unit(
                     kind="question_answer",
-                    anchor=block.text,
+                    anchor=f"**{block.title}**" if heading_question else block.text,
                     body="\n\n".join(item.text for item in answer_blocks),
                     heading_path=current_path(),
                     page_start=block.page_start,
@@ -601,12 +652,13 @@ def detect_content_route(blocks: list[_Block]) -> str:
     has_faq_table = False
     manual_structure = 0
     for block in blocks:
-        if block.kind == "paragraph" and _is_question(block.text):
+        if (block.kind == "paragraph" and not block.review_required and _is_question(block.text)
+                or block.kind == "heading" and not block.review_required
+                and (block.title or "").endswith("?")):
             question_count += 1
-        if block.kind == "table" and re.search(
-            r"(?i)\|\s*question\s*\|\s*answer\s*\|", block.text.splitlines()[0]
-        ):
-            has_faq_table = True
+        if block.kind == "table":
+            columns = {_plain_text(value).strip("*_` ").casefold() for value in split_table_row(block.text.splitlines()[0])}
+            has_faq_table |= bool(columns & {"question", "questions", "q"}) and bool(columns & {"answer", "answers", "a"})
         if block.kind == "heading" and re.match(
             r"^(?:chapter\s+\d+|\d+(?:\.\d+){1,}\s+)", block.title or "", re.I
         ):
@@ -667,7 +719,7 @@ def chunk_markdown(
     blocks = _merge_plain_numbered_questions(_parse_blocks(markdown))
     schedule_tables = [
         block for block in blocks if block.kind == "table"
-        and is_schedule_header(block.text.splitlines()[0].strip("|").split("|"))
+        and is_schedule_header(split_table_row(block.text.splitlines()[0]))
     ]
     is_schedule = bool(schedule_tables) or bool(metadata and metadata.document_class == "schedule")
     kind = metadata.schedule_kind if metadata else None
@@ -726,7 +778,9 @@ def chunk_markdown(
         fixed_parts = [part for part in (context, anchor) if part]
         fixed = "\n\n".join(fixed_parts)
         body_limit = max(80, max_chars - len(fixed) - (2 if fixed else 0))
-        if unit.kind == "table_row" and not unit.anchor:
+        if unit.kind == "code":
+            body_parts = [unit.body]  # Preserve indentation and literal control-marker text.
+        elif unit.kind == "table_row" and not unit.anchor:
             body_parts = _split_generic_table_row(unit.body, body_limit)
         elif unit.kind == "table" and not unit.anchor:
             body_parts = _split_text(unit.body, body_limit)
@@ -797,13 +851,16 @@ def chunk_markdown(
                         and 2 <= unit.table_row_number < len(metadata.csv_source_rows) + 2
                         else None
                     ),
-                    review_required=unit.review_required,
+                    review_required=unit.review_required or len(text) > max_chars,
                     evidence_status=(
                         "excluded" if bool(re.search(r"\.{8,}\s*\d{1,4}\b", unit.body))
                         or unit.body.strip().isdigit()
                         or unit.body.startswith("Source document metadata:")
+                        or ("Visual evidence on page" in unit.body and "no verified description" in unit.body)
+                        or "Untranscribed equation at" in unit.body
                         else "pending"
                     ),
+                    chunker_version=CHUNKER_VERSION,
                 )
             )
 

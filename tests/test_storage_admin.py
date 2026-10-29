@@ -69,7 +69,7 @@ class AdminIntegrationTests(TestCase):
             settings = Settings(DB, QDRANT, Path(temporary),
                                 collection="gsme_admin_it_" + uuid4().hex[:12], dimension=32)
             store = EvidenceStore(DB)
-            store.migrate(root)
+            store.migrate()
             tenant = "admin-it-" + uuid4().hex
             with patch.dict(os.environ, {"GSME_REVIEW_AUTH_TOKEN": TOKEN,
                                       "GSME_AUTHORIZED_REVIEWERS": "alice"}):
@@ -77,6 +77,7 @@ class AdminIntegrationTests(TestCase):
                 with TestClient(app, base_url="http://127.0.0.1:8010",
                                 client=("127.0.0.1", 12345)) as client:
                     headers = {"X-GSME-Token": TOKEN}
+                    self.assertEqual(client.get("/api/health", headers=headers).status_code, 200)
                     source = root / "examples" / "synthetic_reviewed_faq.docx"
                     with source.open("rb") as file:
                         submitted = client.post("/api/submit", headers=headers,

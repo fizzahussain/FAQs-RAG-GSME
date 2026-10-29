@@ -1,6 +1,7 @@
 """Regression gates for the manual's TOC, equations, and chart evidence."""
 
 import hashlib
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from gsme_rag.parsing.pdf import _Line, _extract_lines, _native_markdown, _recov
 from gsme_rag.review import ReviewDecision, ReviewLedger, eligible_for_embedding
 
 
-MANUAL = Path(r"D:\Downloads\MFG-GSME-0002.pdf")
+MANUAL = Path(os.getenv("GSME_TEST_MANUAL_PDF", "validation/source/MFG-GSME-0002.pdf"))
 
 
 class EvidenceFidelityTests(unittest.TestCase):

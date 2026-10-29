@@ -2,12 +2,13 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from gsme_rag.api.routes import router
+from gsme_rag.version import __version__
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="GSME RAG Pipeline Demo",
-        version="0.15.4",
+        title="GSME Parsing and Chunking Preview",
+        version=__version__,
         description=(
             "Stage 1 normalizes DOCX, PDF, CSV, or image input to Markdown. "
             "Stage 2 routes semantic Markdown units automatically. Schedule CSVs "
@@ -29,7 +30,7 @@ DEMO_PAGE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GSME RAG Pipeline Demo</title>
+  <title>GSME Parsing and Chunking Preview</title>
   <style>
     body { max-width: 980px; margin: 40px auto; padding: 0 24px; font-family: Arial, sans-serif; color: #111; background: #fff; }
     h1, h2 { color: #111; }
@@ -45,8 +46,8 @@ DEMO_PAGE = """
   </style>
 </head>
 <body>
-  <h1>GSME RAG Pipeline Demo</h1>
-  <p class="note">Week 1: files become Markdown. Week 2: semantic text becomes evidence chunks. Schedules produce exact, typed rows with source metadata.</p>
+  <h1>GSME Parsing and Chunking Preview</h1>
+  <p class="note">Preview normalized text, chunks, and exact schedule filters. Use the local document console for review, embeddings, storage, and evidence search.</p>
 
   <section>
     <h2>1. Parse file to Markdown</h2>

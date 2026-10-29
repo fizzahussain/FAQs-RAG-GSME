@@ -16,6 +16,13 @@ from gsme_rag.parsing import parse_to_markdown
 from gsme_rag.parsing.ocr import find_tesseract
 
 
+def optional_version(package: str) -> str | None:
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def main() -> None:
     parser = ArgumentParser()
     parser.add_argument("pdf", type=Path)
@@ -51,7 +58,7 @@ def main() -> None:
             "python_version": sys.version,
             "gsme_rag_version": importlib.metadata.version("gsme-rag"),
             "pymupdf_version": importlib.metadata.version("PyMuPDF"),
-            "docling_version": importlib.metadata.version("docling"),
+            "docling_version": optional_version("docling"),
             "tesseract_executable": tesseract,
             "tesseract_languages": languages,
             "docling_device": os.getenv("DOCLING_DEVICE"),

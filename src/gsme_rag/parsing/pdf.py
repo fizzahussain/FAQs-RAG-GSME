@@ -6,13 +6,12 @@ from importlib.util import find_spec
 import os
 from pathlib import Path
 import re
-import shutil
 from statistics import median
 
 import pymupdf as fitz
 
-from gsme_rag.parsing.markdown import finish_markdown, render_markdown_table, table_requires_review
-from gsme_rag.parsing.ocr import OcrUnavailable, ocr_image
+from gsme_rag.parsing.markdown import finish_markdown, render_markdown_table, table_requires_review, review_pdf_pages
+from gsme_rag.parsing.ocr import OcrUnavailable, ocr_image, find_tesseract
 from gsme_rag.models import ParseWarning, ParsedDocument
 from gsme_rag.text import normalize_inline, normalize_multiline, split_question_number
 
@@ -64,11 +63,14 @@ def _extract_lines(document: fitz.Document) -> list[_Line]:
 
     # Remove repeated margin text only when most pages share it
     repeated: Counter[tuple[str, str]] = Counter()
+    seen_margin_lines: set[tuple[int, str, str]] = set()
     for line in lines:
         page_height = document[line.page - 1].rect.height
         zone = "top" if line.y0 < page_height * .11 else "bottom" if line.y0 > page_height * .88 else ""
-        if zone:
+        key = (line.page, zone, line.text.casefold())
+        if zone and key not in seen_margin_lines:
             repeated[(zone, line.text.casefold())] += 1
+            seen_margin_lines.add(key)
     threshold = max(2, min(3, (len(document) + 1) // 2))
     filtered = []
     for line in lines:
@@ -260,7 +262,12 @@ def _layout_markdown(lines: list[_Line], allow_visual_headings: bool = True) -> 
                       or line.text.casefold() == "table of contents")
         if is_heading:
             flush_text()
-            level = 1 if not has_document_title or not first_heading_written else 2
+            if chapter:
+                level = 1
+            elif numbered_section:
+                level = min(6, line.text.split()[0].count(".") + 1)
+            else:
+                level = 1 if not has_document_title or not first_heading_written else 2
             parts.append(f"{'#' * level} {line.text}")
             first_heading_written = True
         elif line.bold_share >= 0.6:
@@ -335,7 +342,7 @@ def _native_markdown(document: fitz.Document, lines: list[_Line],
                 entries.append((line.y0, line))
         if len(" ".join(line.text for line in page_lines)) < 90 and page.get_images() and not accepted_tables:
             recovered = ""
-            if shutil.which("tesseract"):
+            if find_tesseract():
                 try:
                     recovered = normalize_multiline(page.get_text("text", textpage=page.get_textpage_ocr(dpi=200)))
                 except RuntimeError:
@@ -546,7 +553,8 @@ def _restore_numbered_section_headings(markdown: str, lines: list[_Line]) -> tup
                 plain = _plain_markdown_line(markdown_line)
                 if plain.casefold() not in {full.casefold(), suffix.casefold()}:
                     continue
-                replacement = f"## {source_line.text}"
+                level = min(6, source_line.text.split()[0].count(".") + 1)
+                replacement = f"{'#' * level} {source_line.text}"
                 if markdown_line.strip() != replacement:
                     segment_lines[line_index] = replacement
                     restored_pages.add(page_number)
@@ -561,7 +569,10 @@ def _remove_repeated_pdf_furniture(markdown: str, document: fitz.Document) -> tu
         return markdown, 0
     repeated: Counter[tuple[str, str]] = Counter()
     display: dict[tuple[str, str], str] = {}
-    for page in document:
+    body_values: dict[int, set[str]] = {}
+    footer_pages: set[int] = set()
+    for page_number, page in enumerate(document, start=1):
+        page_keys: set[tuple[str, str]] = set()
         for block in page.get_text("dict").get("blocks", []):
             for raw_line in block.get("lines", []):
                 value = normalize_inline("".join(span.get("text", "") for span in raw_line.get("spans", [])))
@@ -572,11 +583,16 @@ def _remove_repeated_pdf_furniture(markdown: str, document: fitz.Document) -> tu
                 zone = ("top" if y0 < page.rect.height * .13
                         else "bottom" if y1 > page.rect.height * .87 else "")
                 if not zone:
+                    body_values.setdefault(page_number, set()).add(value.casefold())
                     continue
+                if zone == "bottom" and value == str(page_number):
+                    footer_pages.add(page_number)
                 # Footer page numbers change on every page
                 stable = re.sub(r"^\d+\s+(?=\S)", "", value)
                 key = (zone, stable.casefold())
-                repeated[key] += 1
+                if key not in page_keys:
+                    repeated[key] += 1
+                    page_keys.add(key)
                 display.setdefault(key, stable)
     threshold = max(2, min(3, (len(document) + 1) // 2))
     top_values = [display[key] for key, count in repeated.items() if key[0] == "top" and count >= threshold]
@@ -598,10 +614,11 @@ def _remove_repeated_pdf_furniture(markdown: str, document: fitz.Document) -> tu
         lines_out: list[str] = []
         for line in segment.splitlines():
             plain = _plain_markdown_line(line)
-            if plain and any(plain.casefold() == value.casefold() for value in top_values):
+            protected = plain.casefold() in body_values.get(page_number, set())
+            if plain and not protected and any(plain.casefold() == value.casefold() for value in top_values):
                 removed += 1
                 continue
-            if plain == str(page_number):
+            if plain == str(page_number) and page_number in footer_pages and not protected:
                 removed += 1
                 continue
             lines_out.append(line)
@@ -876,11 +893,12 @@ def _supplement_image_ocr(document: fitz.Document, converted: ParsedDocument,
 def parse_pdf_to_markdown(
     path: str | Path,
     source_name: str | None = None,
+    backend: str | None = None,
 ) -> ParsedDocument:
     input_path = Path(path)
     display_name = source_name or input_path.name
     warnings: list[ParseWarning] = []
-    backend = os.environ.get("GSME_PDF_BACKEND", "auto").casefold()
+    backend = (backend or os.environ.get("GSME_PDF_BACKEND", "auto")).casefold()
     if backend not in {"auto", "native", "docling"}:
         raise ValueError("GSME_PDF_BACKEND must be auto, native or docling")
 
@@ -911,10 +929,13 @@ def parse_pdf_to_markdown(
             for page in document
         )
         if lines and not special_faq and not complex_layout and backend != "docling":
+            from gsme_rag.parsing.fidelity import inspect_pdf_fidelity
+            diagnostics, fidelity_warnings, review_pages = inspect_pdf_fidelity(document, max_ocr_regions=0)
             return ParsedDocument(
                 filename=display_name, document_type="pdf",
                 strategy_used="pdf_reading_order_to_markdown",
-                markdown=_layout_markdown(lines), warnings=[],
+                markdown=review_pdf_pages(_layout_markdown(lines), review_pages),
+                warnings=fidelity_warnings, evidence_diagnostics=diagnostics,
             )
         if not special_faq:
             docling_available = find_spec("docling") is not None
@@ -964,6 +985,7 @@ def parse_pdf_to_markdown(
             fidelity_evidence, fidelity_warnings, fidelity_pages = inspect_pdf_fidelity(
                 document, max_ocr_regions=0)
             markdown, native_warnings = _native_markdown(document, lines, fidelity_pages)
+            markdown, _ = _remove_repeated_pdf_furniture(markdown, document)
             warnings.extend(native_warnings)
             warnings.extend(fidelity_warnings)
             if not markdown.replace("<!--", "").strip() or not lines and not any(w.code == "ocr_needs_review" for w in warnings):
@@ -986,7 +1008,8 @@ def parse_pdf_to_markdown(
                 ),
             )
         )
-        markdown = finish_markdown(["<!-- pdf-table-layout -->\n" + table])
+        markdown = finish_markdown(["<!-- pdf-table-layout -->\n<!-- review-required: inferred-pdf-table -->\n"
+                                    + table + "\n<!-- review-end -->"])
         strategy = "pdf_table_layout_to_markdown"
     else:
         markdown = _layout_markdown(lines)

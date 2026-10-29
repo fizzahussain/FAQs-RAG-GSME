@@ -85,7 +85,7 @@ class StorageBoundaryTests(TestCase):
 
             def embed(self, **kwargs):
                 self.requests.append(("embed", kwargs))
-                return SimpleNamespace(embeddings=SimpleNamespace(float=[[0.0] * 1024]
+                return SimpleNamespace(embeddings=SimpleNamespace(float=[[1.0] + [0.0] * 1023]
                                        * len(kwargs["texts"])))
 
         provider = CohereEmbeddings.__new__(CohereEmbeddings)
@@ -179,12 +179,16 @@ class StorageBoundaryTests(TestCase):
                 (
                     point_id,
                     [1.0, 0.0, 0.0, 0.0],
-                    {"tenant_id": "tenant-a", "version_id": "v1", "text": "synthetic deadline"},
+                    {"tenant_id": "tenant-a", "version_id": "v1", "text": "synthetic deadline",
+                     "model_version": "model-a"},
                 )
             ]
         )
         self.assertEqual(len(index.query("tenant-a", [1.0, 0.0, 0.0, 0.0], 5)), 1)
         self.assertEqual(len(index.query("tenant-b", [1.0, 0.0, 0.0, 0.0], 5)), 0)
+        self.assertEqual(len(index.query("tenant-a", [1.0, 0.0, 0.0, 0.0], 5, model_version="model-b")), 0)
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            index.query("tenant-a", [float("nan"), 0.0, 0.0, 0.0], 5)
         self.assertEqual(len(index.query("tenant-a", [1.0, 0.0, 0.0, 0.0], 5, text="deadline")), 1)
         index.delete([point_id])
         self.assertEqual(index.query("tenant-a", [1.0, 0.0, 0.0, 0.0], 5), [])

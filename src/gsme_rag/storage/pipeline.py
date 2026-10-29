@@ -9,18 +9,20 @@ from threading import Event, Thread
 import time
 
 from gsme_rag.chunking import chunk_markdown
-from gsme_rag.indexing import prepare_candidate
+from gsme_rag.indexing import prepare_candidate, CandidateValidationError
 from gsme_rag.models import MarkdownChunk
 from gsme_rag.parsing import parse_to_markdown
 from gsme_rag.parsing.schedules import parse_schedule_records
+from gsme_rag.parsing.profile import source_profile
 from gsme_rag.review import ReviewDecision, ReviewLedger
 from gsme_rag.storage.config import Settings
 from gsme_rag.storage.postgres import EvidenceStore
 from gsme_rag.storage.providers import ProviderOperationError
+from gsme_rag.version import PARSER_VERSION, CHUNKER_VERSION
 
 
 def _index_error_label(error: Exception, stage: str) -> str:
-    detail = f"; {error}" if isinstance(error, ProviderOperationError) else ""
+    detail = f"; {error}" if isinstance(error, (ProviderOperationError, CandidateValidationError)) else ""
     return f"{type(error).__name__}: index {stage} failed{detail}"
 
 
@@ -111,12 +113,19 @@ def process_ingestion(
 
 
 def _run_ingestion(store, settings, job, started, lease, stage):
+    stage["name"] = "parser_version_check"
+    if job["parser_version"] != PARSER_VERSION or job["chunker_version"] != CHUNKER_VERSION:
+        raise ValueError("Queued job uses a different parser/chunker version; resubmit the source")
     stage["name"] = "source_check"
     original = Path(job["original_path"])
-    if not original.is_file():
+    if not original.is_file() or original.is_symlink():
         raise ValueError("Durable original is missing")
+    stage["name"] = "parser_environment_check"
+    if source_profile(original, job["parse_options"].get("pdf_backend")) != job["parse_options"]:
+        raise ValueError("Parser dependencies changed after submission; resubmit the source")
     stage["name"] = "parse"
-    parsed = parse_to_markdown(original, job["source_file"], job["schedule_kind"])
+    parsed = parse_to_markdown(original, job["source_file"], job["schedule_kind"],
+                               pdf_backend=job["parse_options"].get("pdf_backend"))
     if parsed.metadata.classification_status != "ready":
         raise ValueError("Schedule kind is ambiguous. Submit with Full or Shared")
     # Schedule dates stay as typed rows for exact filtering
@@ -139,7 +148,8 @@ def _run_ingestion(store, settings, job, started, lease, stage):
         if not chunks:
             raise ValueError("Parser produced no reviewable chunks")
     stage["name"] = "artifact_write"
-    artifact = settings.data_dir / "artifacts" / str(job["version_id"])
+    # A reclaimed worker must not overwrite the new attempt's files.
+    artifact = settings.data_dir / "artifacts" / str(job["version_id"]) / str(job["attempts"])
     artifact.mkdir(parents=True, exist_ok=True)
     target = artifact / "normalized.md"
     temporary = artifact / ".normalized.tmp"
@@ -205,6 +215,8 @@ def process_index(
 
 
 def _run_index(store, vectors, provider, settings, jobs, prepared, started, lease, stage):
+    candidate_errors = {}
+    embedding_calls = 0
     try:
         stage["name"] = "approval_check"
         with _approval_lock(store, jobs):
@@ -253,25 +265,24 @@ def _run_index(store, vectors, provider, settings, jobs, prepared, started, leas
                         )
                     ]
                 )
-                candidate = prepare_candidate(
-                    chunk,
-                    ledger,
-                    tenant_id=job["tenant_id"],
-                    model_version=job["model_version"],
-                    encode_tokens=provider.encode_tokens,
-                    max_tokens=settings.max_tokens,
-                )
+                try:
+                    candidate = prepare_candidate(
+                        chunk, ledger, tenant_id=job["tenant_id"], model_version=job["model_version"],
+                        encode_tokens=provider.encode_tokens, max_tokens=settings.max_tokens,
+                    )
+                except CandidateValidationError as error:
+                    # A too-large or invalid candidate must not poison its healthy neighbors.
+                    candidate_errors[job["id"]] = _index_error_label(error, "candidate_validation")
+                    continue
                 prepared.append((job, candidate))
             stage["name"] = "document_embedding"
-            embeddings = (
-                provider.embed_documents([candidate.text for _, candidate in prepared])
-                if prepared
-                else []
-            )
+            embeddings = []
             if prepared:
-                store.record_embedding_batch(
-                    provider.model_version, len(prepared), time.perf_counter() - started
-                )
+                embedding_calls = 1
+                try:
+                    embeddings = provider.embed_documents([candidate.text for _, candidate in prepared])
+                finally:
+                    store.record_embedding_batch(provider.model_version, len(prepared), time.perf_counter() - started)
             if len(embeddings) != len(prepared):
                 raise ValueError("Embedding provider returned wrong number of vectors")
             lease.check()
@@ -300,14 +311,17 @@ def _run_index(store, vectors, provider, settings, jobs, prepared, started, leas
             lease.check()
         stage["name"] = "job_completion"
         for job in jobs:
-            store.index_done(job["id"], job["attempt_count"])
-        return {"indexed": len(jobs), "embedding_calls": int(bool(prepared)), "failed": 0}
+            error = candidate_errors.get(job["id"])
+            store.index_done(job["id"], job["attempt_count"], error=error, retryable=not bool(error))
+        store.mark_indexed_versions(list({job["version_id"] for job in jobs}))
+        return {"indexed": len(jobs) - len(candidate_errors), "embedding_calls": embedding_calls,
+                "failed": len(candidate_errors), "candidate_errors": list(candidate_errors.values())}
     except Exception as error:
         # Keep source text and secrets out of stored errors
         label = _index_error_label(error, stage["name"])
         for job in jobs:
             store.index_done(job["id"], job["attempt_count"], error=label)
-        return {"indexed": 0, "embedding_calls": 0, "failed": len(jobs), "error": label}
+        return {"indexed": 0, "embedding_calls": embedding_calls, "failed": len(jobs), "error": label}
 
 
 def reconcile(store: EvidenceStore, vectors, model_version: str, limit: int = 100) -> int:
@@ -357,6 +371,19 @@ def reconcile(store: EvidenceStore, vectors, model_version: str, limit: int = 10
         return len(still_stale)
 
 
+def repair_missing_vectors(store: EvidenceStore, vectors, model_version: str,
+                           tenant_id: str, version_id: str) -> int:
+    """Queue missing derived points; embedding still needs a separate worker action."""
+    after = None
+    repaired = 0
+    collection_exists = vectors.client.collection_exists(vectors.collection)
+    while rows := store.indexed_points(tenant_id, version_id, model_version, vectors.collection, after):
+        found = vectors.existing([str(row["point_id"]) for row in rows]) if collection_exists else {}
+        repaired += store.requeue_missing_points([row["id"] for row in rows if str(row["point_id"]) not in found])
+        after = rows[-1]["id"]
+    return repaired
+
+
 def search_evidence(
     store: EvidenceStore,
     vectors,
@@ -371,6 +398,8 @@ def search_evidence(
         raise ValueError("Tenant, question, and bounded limit are required")
     if hybrid and not settings.hybrid_enabled:
         raise ValueError("Enable GSME_HYBRID only after dense evaluation")
+    if not store.has_indexed_evidence(tenant_id, provider.model_version, vectors.collection):
+        return []
     if len(provider.encode_tokens(question)) > settings.max_tokens:
         raise ValueError("Query exceeds embedding token budget")
     query_vector = provider.embed_query(question)
@@ -380,7 +409,8 @@ def search_evidence(
     window = max(20, limit * 5)
     results = []
     while True:
-        hits = vectors.query(tenant_id, query_vector, window, text=question if hybrid else None)
+        hits = vectors.query(tenant_id, query_vector, window, text=question if hybrid else None,
+                             model_version=provider.model_version)
         ids = [str(hit.id) for hit in hits]
         # Return text and citations from PostgreSQL instead of Qdrant payloads
         allowed = store.allowed_hits(tenant_id, ids, provider.model_version, vectors.collection)
@@ -401,6 +431,13 @@ def search_evidence(
                         "page_start": row["source_page_start"],
                         "page_end": row["source_page_end"],
                         "table_row_number": row["table_row_number"],
+                        "heading_path": row["heading_path"],
+                        "faq_question": row["faq_question"],
+                        "unit_id": row["unit_id"], "part_index": row["part_index"],
+                        "part_count": row["part_count"], "review_required": row["review_required"],
+                        "evidence_status": "approved", "model_version": provider.model_version,
+                        "parser_backend": row["parser_backend"],
+                        "parser_version": row["parser_version"], "chunker_version": row["chunker_version"],
                     }
                 )
             if len(results) >= limit:

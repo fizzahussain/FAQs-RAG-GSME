@@ -330,7 +330,7 @@ class PdfUpgradeTests(unittest.TestCase):
             with patch("gsme_rag.parsing.pdf.find_spec", return_value=object()), patch(
                 "gsme_rag.parsing.docling_pdf.parse_docling_pdf"
             ) as converter:
-                parsed = parse_to_markdown(path)
+                parsed = parse_to_markdown(path, pdf_backend="auto")
             converter.assert_not_called()
             self.assertEqual(parsed.strategy_used, "pymupdf_table_fallback")
             self.assertIn("docling_skipped_large_pdf", [warning.code for warning in parsed.warnings])
@@ -356,7 +356,7 @@ class PdfUpgradeTests(unittest.TestCase):
             with patch("gsme_rag.parsing.pdf.find_spec", return_value=object()), patch(
                 "gsme_rag.parsing.docling_pdf.parse_docling_pdf", return_value=empty
             ):
-                parsed = parse_to_markdown(path)
+                parsed = parse_to_markdown(path, pdf_backend="auto")
             self.assertEqual(parsed.strategy_used, "pymupdf_table_fallback")
             self.assertIn("Alpha", parsed.markdown)
             self.assertIn("docling_empty_fallback", [warning.code for warning in parsed.warnings])

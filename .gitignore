@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 *.log
 build/
+dist/
 tmp*
 pip-ephem-wheel-cache-*/
 validation/

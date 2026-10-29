@@ -1,5 +1,5 @@
 {
   "source": "source_reviewed",
   "cases": [],
-  "instructions": "Add supervisor-reviewed question, tenant_id and expected_chunk_ids from approved source evidence only. Leave empty until reviewed."
+  "instructions": "Each reviewed case needs question, tenant_id and expected_evidence: [{version_id, chunk_id, source_sha256}]. Pin currently published source-approved evidence. Leave cases empty until source review; an empty template is not a benchmark."
 }

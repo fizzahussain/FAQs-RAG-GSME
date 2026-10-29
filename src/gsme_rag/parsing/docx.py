@@ -8,11 +8,13 @@ from docx.document import Document as DocumentObject
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
+from docx.text.hyperlink import Hyperlink
 
 from gsme_rag.parsing.markdown import finish_markdown, render_markdown_table
 from gsme_rag.parsing.ocr import OcrUnavailable, ocr_image
 from gsme_rag.models import ParseWarning, ParsedDocument
 from gsme_rag.text import normalize_inline, normalize_multiline
+from gsme_rag.parsing.fidelity import _reason as fidelity_reason
 
 
 def _iter_blocks(document: DocumentObject) -> Iterator[Paragraph | Table]:
@@ -23,40 +25,51 @@ def _iter_blocks(document: DocumentObject) -> Iterator[Paragraph | Table]:
             yield Table(child, document)
 
 
-def _format_runs(paragraph: Paragraph) -> str:
-    groups: list[tuple[str, bool, bool]] = []
-    for run in paragraph.runs:
+def _format_runs(paragraph: Paragraph, include_emphasis: bool = True) -> str:
+    groups: list[tuple[str, bool, bool, str]] = []
+    # Hyperlinks contain their own runs and are absent from paragraph.runs.
+    runs = [run for item in paragraph.iter_inner_content()
+            for run in (item.runs if isinstance(item, Hyperlink) else [item])]
+    for run in runs:
         text = run.text.replace("\r", "").replace("\n", " ")
         if not text:
             continue
-        bold, italic = run.bold is True, run.italic is True
-        if groups and groups[-1][1:] == (bold, italic):
-            previous, _, _ = groups[-1]
-            groups[-1] = (previous + text, bold, italic)
+        bold = next((value for value in (run.bold, run.style.font.bold, paragraph.style.font.bold)
+                     if value is not None), False)
+        italic = next((value for value in (run.italic, run.style.font.italic, paragraph.style.font.italic)
+                       if value is not None), False)
+        position = "sup" if run.font.superscript else "sub" if run.font.subscript else ""
+        if groups and groups[-1][1:] == (bold, italic, position):
+            previous = groups[-1][0]
+            groups[-1] = (previous + text, bold, italic, position)
         else:
-            groups.append((text, bold, italic))
+            groups.append((text, bold, italic, position))
 
     fragments = []
-    for text, bold, italic in groups:
-        marker = "***" if bold and italic else "**" if bold else "*" if italic else ""
+    for text, bold, italic, position in groups:
+        if position:
+            text = f"<{position}>{text}</{position}>"
+        marker = ("***" if bold and italic else "**" if bold else "*" if italic else "") if include_emphasis else ""
         fragments.append(f"{marker}{text}{marker}" if marker else text)
     rendered = "".join(fragments)
     return re.sub(r"[ \t]+", " ", rendered).strip()
 
 
 def _paragraph_to_markdown(paragraph: Paragraph) -> str:
+    style = paragraph.style.name if paragraph.style else "Normal"
+    if style.casefold() in {"code", "source code", "html preformatted"}:
+        return "```\n" + paragraph.text.rstrip("\r\n") + "\n```"
     text = _format_runs(paragraph)
     if not text:
         return ""
 
-    style = paragraph.style.name if paragraph.style else "Normal"
     heading_match = re.match(r"Heading\s+([1-6])", style, flags=re.IGNORECASE)
     if heading_match:
         level = int(heading_match.group(1))
-        return f"{'#' * level} {normalize_inline(paragraph.text)}"
+        return f"{'#' * level} {normalize_inline(_format_runs(paragraph, include_emphasis=False))}"
 
     if style.lower().startswith("title"):
-        return f"# {normalize_inline(paragraph.text)}"
+        return f"# {normalize_inline(_format_runs(paragraph, include_emphasis=False))}"
     if "list bullet" in style.lower():
         return f"- {text}"
     if "list number" in style.lower():
@@ -115,18 +128,37 @@ def _image_text(element, part, location: str, warnings: list[ParseWarning],
 
 
 def _cell_text(cell, warnings: list[ParseWarning], location: str,
-               cache: dict[str, str | ValueError]) -> tuple[str, bool]:
+               cache: dict[str, str | ValueError], depth: int = 0) -> tuple[str, bool]:
     parts: list[str] = []
-    has_ocr = False
-    for paragraph in cell.paragraphs:
-        value = normalize_inline(paragraph.text)
-        recognized = _image_text(paragraph._p, paragraph.part, location, warnings, cache)
-        if recognized:
-            has_ocr = True
-            value = "\n".join([value, *recognized]).strip()
-        if value:
-            parts.append(value)
-    return normalize_multiline("\n".join(parts)), has_ocr
+    needs_review = False
+    for block in cell.iter_inner_content():
+        if isinstance(block, Paragraph):
+            value = normalize_inline(_format_runs(block))
+            recognized = _image_text(block._p, block.part, location, warnings, cache)
+            needs_review |= bool(recognized or fidelity_reason(value))
+            if reason := fidelity_reason(value):
+                warnings.append(ParseWarning("text_fidelity_needs_review", reason, location))
+            if recognized:
+                value = "\n".join([value, *recognized]).strip()
+            if value:
+                parts.append(value)
+            if any(node.tag == qn("m:oMath") for node in block._p.iter()):
+                needs_review = True
+                warnings.append(ParseWarning("docx_equation_unavailable",
+                    "Word equation layout has no verified text transcription", location))
+                parts.append(f"Untranscribed equation at {location}; inspect the original source.")
+            continue
+        nested = block
+        needs_review = True  # Nested cell relationships need review even without OCR.
+        if depth >= 8:
+            warnings.append(ParseWarning("nested_table_depth_limit", "Nested table depth exceeds eight", location))
+            parts.append("Nested table content requires inspection in the original document.")
+            continue
+        for row_number, row in enumerate(nested.rows, start=1):
+            values = [_cell_text(child, warnings, location, cache, depth + 1)[0] for child in row.cells]
+            parts.append(f"Nested table row {row_number}: " + "; ".join(
+                f"Column {index + 1}: {value}" for index, value in enumerate(values)))
+    return normalize_multiline("\n".join(parts)), needs_review
 
 
 def parse_docx_to_markdown(
@@ -146,21 +178,31 @@ def parse_docx_to_markdown(
         if isinstance(block, Paragraph):
             paragraph_number += 1
             rendered = _paragraph_to_markdown(block)
+            reason = fidelity_reason(block.text)
+            if reason and rendered:
+                warnings.append(ParseWarning("text_fidelity_needs_review", reason, f"paragraph {paragraph_number}"))
+                rendered = f"<!-- review-required: text-fidelity -->\n\n{rendered}\n\n<!-- review-end -->"
             if rendered:
                 parts.append(rendered)
+            if any(node.tag == qn("m:oMath") for node in block._p.iter()):
+                warnings.append(ParseWarning("docx_equation_unavailable",
+                    "Word equation layout has no verified text transcription", f"paragraph {paragraph_number}"))
+                parts.extend(("<!-- review-required: equation-unavailable -->",
+                              f"Untranscribed equation at paragraph {paragraph_number}; inspect the original source.",
+                              "<!-- review-end -->"))
             for recognized in _image_text(block._p, block.part, f"paragraph {paragraph_number}", warnings, image_cache):
                 parts.extend(("<!-- review-required: docx-image-ocr -->", recognized, "<!-- review-end -->"))
             continue
 
         table_number += 1
-        table_has_ocr = False
+        table_needs_review = False
         rows = []
         for row_number, row in enumerate(block.rows, start=1):
             cells = []
             for column_number, cell in enumerate(row.cells, start=1):
-                value, has_ocr = _cell_text(cell, warnings, f"table {table_number} row {row_number} column {column_number}", image_cache)
+                value, needs_review = _cell_text(cell, warnings, f"table {table_number} row {row_number} column {column_number}", image_cache)
                 cells.append(value)
-                table_has_ocr |= has_ocr
+                table_needs_review |= needs_review
             rows.append(cells)
         if not rows:
             warnings.append(
@@ -175,10 +217,15 @@ def parse_docx_to_markdown(
             warnings.append(
                 ParseWarning(
                     code="nested_table_review",
-                    message="Nested tables need manual review; cell paragraph text was kept",
+                    message="Nested table cells were retained as labeled text; verify their relationships",
                     location=f"table {table_number}",
                 )
             )
+        merged = any(len({id(cell._tc) for cell in row.cells}) != len(row.cells) for row in block.rows)
+        if merged:
+            table_needs_review = True
+            warnings.append(ParseWarning("merged_table_review",
+                "Merged Word cells repeat across grid positions; verify column relationships", f"table {table_number}"))
         first_data_row = 2
         if len(rows[0]) == 2 and rows[0][0].rstrip().endswith("?") and rows[0][1]:
             rows.insert(0, ["Question", "Answer"])
@@ -190,14 +237,15 @@ def parse_docx_to_markdown(
                     location=f"table {table_number}",
                 )
             )
+            table_needs_review = True
         table_markdown = (
             f"<!-- table: {table_number}; first_data_row: {first_data_row} -->\n"
             + render_markdown_table(rows)
         )
-        if table_has_ocr:
-            parts.append("<!-- review-required: docx-image-ocr -->")
+        if table_needs_review:
+            parts.append("<!-- review-required: docx-table -->")
         parts.append(table_markdown)
-        if table_has_ocr:
+        if table_needs_review:
             parts.append("<!-- review-end -->")
 
     # Check each header and footer once for embedded images
@@ -210,7 +258,8 @@ def parse_docx_to_markdown(
             visited.add(part.partname)
             for recognized in _image_text(part.element, part, label, warnings, image_cache):
                 parts.extend(("<!-- section-break -->", "<!-- review-required: docx-image-ocr -->",
-                              f"{label.title()} image text (OCR): {recognized}", "<!-- review-end -->"))
+                              f"Source document metadata:\n\n{label.title()} image text (OCR): {recognized}",
+                              "<!-- review-end -->"))
 
     markdown = finish_markdown(parts)
     if "\ufffd" in markdown:

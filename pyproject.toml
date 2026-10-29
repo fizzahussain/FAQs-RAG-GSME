@@ -4,21 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gsme-rag"
-version = "0.15.4"
+version = "0.15.5"
 description = "Inspectable GSME RAG parsing, reviewed storage and evidence retrieval"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.115.0",
-    "python-docx>=1.1.0",
+    "fastapi>=0.162,<0.163",
+    "pydantic>=2.7,<3",
+    "python-docx>=1.2,<2",
     "PyMuPDF>=1.24.0,<2",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30.6",
 ]
 
 [project.optional-dependencies]
-pdf = ["docling>=2.50,<3", "httpx[socks]>=0.27"]
-test = ["httpx2>=0.1.0"]
+# The cell-loss diagnostic hook uses TableFormer internals; validate this pair together.
+pdf = ["docling==2.145.0", "docling-ibm-models==4.0.4", "httpx[socks]>=0.27,<1"]
+test = ["httpx>=0.28,<1", "httpx2>=2.16,<3"]
 storage = ["psycopg[binary]>=3.2,<4", "qdrant-client>=1.20,<1.21", "cohere>=5.20,<6", "tiktoken>=0.9,<1", "python-dotenv>=1,<2", "httpx[socks]>=0.27"]
 
 [project.scripts]
@@ -29,6 +31,9 @@ gsme-rag-admin = "gsme_rag.storage.admin:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"gsme_rag.storage" = ["migrations/*.sql", "web/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

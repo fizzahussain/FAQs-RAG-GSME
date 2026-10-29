@@ -55,7 +55,7 @@ class ReviewLedger:
         latest = relevant[-1]
         if latest.decision == "rejected":
             return "rejected"
-        return "approved" if latest.source_verified or not chunk.review_required else "pending"
+        return "approved" if latest.source_verified else "pending"
 
     @classmethod
     def load(cls, path: Path) -> "ReviewLedger":

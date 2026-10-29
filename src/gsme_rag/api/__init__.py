@@ -1,4 +1,4 @@
-"""FastAPI application for ingestion and hybrid retrieval."""
+"""Stateless parsing preview. Reviewed storage lives in storage.admin."""
 
 __all__ = ["create_app"]
 

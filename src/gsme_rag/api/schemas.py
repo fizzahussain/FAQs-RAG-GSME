@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from gsme_rag.version import CHUNKER_VERSION
+
 
 class ParseWarningOut(BaseModel):
     code: str
@@ -14,7 +16,7 @@ class ParseWarningOut(BaseModel):
 class EvidenceDiagnosticOut(BaseModel):
     evidence_id: str
     kind: str
-    page: int
+    page: int | None
     bbox: tuple[float, float, float, float] | None = None
     original_text: str
     alternate_reading: str | None = None
@@ -107,7 +109,7 @@ class MarkdownChunkOut(BaseModel):
     source_row_number: int | None = None
     review_required: bool | None = None
     evidence_status: str = "pending"
-    chunker_version: str = "0.14.7"
+    chunker_version: str = CHUNKER_VERSION
 
 
 class ChunkResponse(BaseModel):

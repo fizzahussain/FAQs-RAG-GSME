@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GSME Muse · Documents and embeddings</title>
+  <link rel="stylesheet" href="/assets/console.css">
+  <script defer src="/assets/console.js"></script>
+</head>
+<body>
+<h1>GSME Muse documents</h1>
+<p>Upload → parse → check source → approve → publish → embed → test evidence search.</p>
+<div id="message" role="status" aria-live="polite">Connect to get started.</div>
+<section>
+  <h2>Connect</h2>
+  <div class="grid">
+    <div><label for="token">Local access token from .env</label><input id="token" type="password" autocomplete="off"></div>
+    <div><label for="tenant">Workspace (tenant)</label><input id="tenant" value="local-test"></div>
+    <div><label for="reviewer">Reviewer name from .env</label><input id="reviewer" placeholder="For example HP"></div>
+  </div>
+  <button id="connect">Check connection</button>
+  <p class="muted">The reviewer name must appear in GSME_AUTHORIZED_REVIEWERS. Restart the console after changing .env.</p>
+  <pre id="health"></pre>
+</section>
+<section>
+  <h2>1. Upload and parse</h2>
+  <div class="grid">
+    <div><label for="file">DOCX, PDF, CSV, or image</label><input id="file" type="file" accept=".docx,.pdf,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp"></div>
+    <div><label for="schedule">Schedule kind (schedule CSV only)</label><select id="schedule"><option value="">Detect from filename</option><option value="full">Full</option><option value="shared">Shared</option></select></div>
+  </div>
+  <label for="existingDoc">Replace an existing document (optional document ID)</label><input id="existingDoc">
+  <button id="submit">Upload</button><button id="ingest">Parse uploaded job</button><button id="jobStatus">Check job</button><button id="retry">Retry failed parse</button>
+  <p class="muted">Parsing stores the original, normalized text, warnings, and pending chunks locally. Large PDFs may take several minutes.</p>
+  <button id="versions">Refresh document list</button>
+  <label for="versionPicker">Choose a version</label><select id="versionPicker"><option value="">Upload or refresh documents</option></select>
+  <details><summary>Document and job IDs</summary><div class="grid">
+    <div><label for="job">Job ID</label><input id="job"></div><div><label for="version">Version ID</label><input id="version"></div><div><label for="document">Document ID</label><input id="document"></div>
+  </div></details><pre id="jobs"></pre>
+</section>
+<section>
+  <h2>2. Compare and review</h2>
+  <p>Check each chunk against its source. OCR, inferred tables, charts and formulas may need correction in the source before approval.</p>
+  <button id="inspect">Load chunks and status</button><button id="source">Download original</button><button id="markdown">View normalized Markdown</button><button id="manifest">View warnings and diagnostics</button>
+  <pre id="versionInfo"></pre><pre id="artifact"></pre>
+  <button id="previous">Previous chunks</button><span id="pageInfo"></span><button id="next">Next chunks</button>
+  <div id="chunks"></div>
+</section>
+<section>
+  <h2>3. Publish and embed approved chunks</h2>
+  <label for="provider">Embedding provider (also used for previews and search)</label>
+  <select id="provider"><option value="fake">Fake vectors — local workflow test</option><option value="cohere">Cohere — real semantic embeddings</option></select>
+  <p>Publish selects the current document version and queues its approved chunks. Index processes one batch. A result of zero means no jobs were due; check the job states for failures or retry delays.</p>
+  <label><input id="external" type="checkbox"> Send this version's approved text to Cohere</label>
+  <button id="publish">Publish approved version / retry failed index jobs</button><button id="index">Index one batch</button><button id="reconcile">Clean stale vectors</button>
+  <button id="repair">Check for missing stored vectors</button>
+  <pre id="indexInfo"></pre><pre id="embeddingInfo"></pre>
+</section>
+<section>
+  <h2>4. Test evidence search</h2>
+  <p>Search returns approved source text and citations. Fake vectors test the workflow; use Cohere to assess semantic matches.</p>
+  <label for="question">Question about an approved source</label><input id="question">
+  <button id="search">Search evidence</button><pre id="results"></pre>
+</section>
+<section>
+  <h2>Exact schedule search</h2>
+  <p>Validated schedule CSVs become typed rows automatically. Technology, flavor, and date filters use those rows.</p>
+  <div class="grid"><div><label for="kind">Kind</label><select id="kind"><option value="full">Full</option><option value="shared">Shared</option></select></div>
+  <div><label for="technology">Technology (nm, optional)</label><input id="technology" type="number" min="0"></div>
+  <div><label for="flavor">Flavor (optional)</label><input id="flavor"></div>
+  <div><label for="tapeout">Tapeout on or after (optional)</label><input id="tapeout" type="date"></div></div>
+  <button id="schedules">Find schedule rows</button><pre id="scheduleResults"></pre>
+</section>
+<p class="muted">Local administrator console · <a href="/docs">FastAPI reference</a> · Source approval and index state are stored separately.</p>
+</body></html>

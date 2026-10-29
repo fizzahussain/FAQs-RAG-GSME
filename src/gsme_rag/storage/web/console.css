@@ -1,0 +1,7 @@
+body{font:15px system-ui,Arial,sans-serif;max-width:1150px;margin:24px auto;padding:0 18px;color:#17202a;background:#f8fafc}
+h1{margin-bottom:4px}h2{font-size:20px;margin-top:0}section{background:white;border:1px solid #dbe1e7;border-radius:8px;margin:18px 0;padding:18px}
+label{display:block;margin:9px 0 4px;font-weight:600}input,select,textarea,button{font:inherit;padding:8px;border:1px solid #9ba8b4;border-radius:5px;box-sizing:border-box}
+input:not([type=checkbox]):not([type=file]),textarea{width:100%}button{cursor:pointer;background:#144b73;color:white;border:0;margin:7px 5px 7px 0}button:disabled{opacity:.45;cursor:default}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto;background:#eef2f5;padding:12px;border-radius:5px;max-height:320px}pre:empty{display:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.muted{color:#52616f}.chunk{border-top:1px solid #dbe1e7;padding:14px 0}.chunk pre{max-height:260px}.state{font-weight:600}
+#message{position:sticky;top:0;background:#e5f1f8;padding:12px;border-radius:5px;z-index:2}#message.error{background:#ffe6e3}details{margin-top:12px}select{max-width:100%}

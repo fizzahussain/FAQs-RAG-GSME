@@ -62,7 +62,8 @@ def _locate_cell_loss(source, loss):
         page_text = page.get_text("text").casefold()
         scores.append((sum(value.casefold() in page_text for value in tokens), number))
     score, page_number = max(scores, default=(0, None))
-    return page_number if score >= 2 else None
+    unique = sum(value == score for value, _ in scores) == 1
+    return page_number if score >= 2 and unique else None
 
 
 def _cell_loss_evidence(source, losses):
@@ -73,7 +74,13 @@ def _cell_loss_evidence(source, losses):
         page_number = _locate_cell_loss(source, loss)
         if page_number is None:
             warnings.append(ParseWarning(
-                "docling_table_cells_dropped", "Grid cell loss could not be assigned to a source page; review the conversion log"))
+                "docling_table_cells_dropped", "Grid cell loss could not be assigned uniquely to a source page; raw dropped cells are retained in diagnostics"))
+            for cell in loss["missing_cells"]:
+                raw = str(cell.get("text", ""))
+                identifier = hashlib.sha256(f"unlocated-cell|{loss.get('bbox')}|{cell}".encode()).hexdigest()[:20]
+                evidence.append(EvidenceDiagnostic(f"evidence-{identifier}", "table_cell_drop_unlocated",
+                    None, None, raw, None,
+                    f"Unlocated grid {loss.get('bbox')}; raw cell ID {cell.get('id')}, bbox {cell.get('bbox')}; coordinate mapping unverified"))
             continue
         pages.add(page_number)
         page = source[page_number - 1]
@@ -185,6 +192,10 @@ def _normalize_document(document, source_name: str, review_pages: set[int],
         provenance = getattr(item, "prov", None) or []
         page = provenance[0].page_no if provenance else active_page
         if page is not None and page != active_page:
+            if picture_review_open:
+                parts.append("<!-- review-end -->")
+            picture_review_open = False
+            active_picture_level = None
             if page_review_open:
                 parts.append("<!-- review-end -->")
             active_page = page
@@ -274,7 +285,8 @@ def _normalize_document(document, source_name: str, review_pages: set[int],
         if (label in {"caption", "text"} and value.casefold() in emitted_picture_captions
                 or (page, value.casefold()) in emitted_table_captions):
             continue
-        if active_picture_level is not None and level > active_picture_level and not page_review_open:
+        inside_picture = active_picture_level is not None and level > active_picture_level
+        if inside_picture and not page_review_open:
             if not picture_review_open:
                 parts.append("<!-- review-required: ocr -->")
                 picture_review_open = True
@@ -284,14 +296,22 @@ def _normalize_document(document, source_name: str, review_pages: set[int],
                     location=f"page {page}",
                 ))
                 reported_ocr_pages.add(page)
+        if inside_picture:
+            parts.append(value)
+            continue
         if label == "title":
             parts.append(f"# {value}")
         elif label == "section_header":
             if last_header_part is not None and last_header_page == page:
                 previous = parts[last_header_part]
-                if previous.startswith("## "):
+                if previous.startswith("## ") and not re.match(r"## \d+(?:\.\d+)+\s", previous):
                     parts[last_header_part] = f"**{previous[3:]}**"
-            prefix = "#" if re.match(r"^chapter\s+\d+\b", value, re.I) else "##"
+            if re.match(r"^chapter\s+\d+\b", value, re.I):
+                prefix = "#"
+            elif re.match(r"^\d+(?:\.\d+)+\s", value):
+                prefix = "#" * min(6, value.split()[0].count(".") + 1)
+            else:
+                prefix = "##"
             parts.append(f"{prefix} {value}")
             last_header_part = len(parts) - 1
             last_header_page = page

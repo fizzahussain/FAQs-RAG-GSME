@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 import re
 from typing import Literal
 
+from gsme_rag.version import CHUNKER_VERSION, PARSER_VERSION
+
 
 @dataclass(slots=True)
 class ParseWarning:
@@ -16,7 +18,7 @@ class EvidenceDiagnostic:
 
     evidence_id: str
     kind: str
-    page: int
+    page: int | None
     bbox: tuple[float, float, float, float] | None
     original_text: str
     alternate_reading: str | None
@@ -37,7 +39,7 @@ class DocumentMetadata:
     schedule_kind_source: str | None = None
     classification_status: str = "ready"
     schema_version: str = "3"
-    parser_version: str = "0.14.7"
+    parser_version: str = PARSER_VERSION
     csv_source_rows: list[int] | None = None
 
 
@@ -105,7 +107,7 @@ class MarkdownChunk:
     faq_question: str | None = None
     review_required: bool = False
     evidence_status: str = "pending"
-    chunker_version: str = "0.14.7"
+    chunker_version: str = CHUNKER_VERSION
 
     def __post_init__(self) -> None:
         if self.faq_question is None:

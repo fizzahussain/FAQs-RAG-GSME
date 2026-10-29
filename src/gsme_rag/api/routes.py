@@ -4,7 +4,6 @@ import asyncio
 from dataclasses import asdict
 import hashlib
 from pathlib import Path
-import shutil
 import tempfile
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
@@ -21,6 +20,7 @@ from gsme_rag.api.schemas import (
 from gsme_rag.chunking import chunk_markdown, compare_strategies
 from gsme_rag.models import DocumentMetadata, chunk_to_record
 from gsme_rag.parsing import parse_to_markdown
+from gsme_rag.parsing.ocr import tesseract_environment
 from gsme_rag.parsing.schedules import (
     filter_schedule_records,
     make_source_id,
@@ -45,23 +45,29 @@ async def _save_upload(upload: UploadFile) -> tuple[Path, str, str]:
 
     total = 0
     # Stream demo uploads to disk within the public size limit
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as target:
-        path = Path(target.name)
-        while chunk := await upload.read(1024 * 1024):
-            total += len(chunk)
-            if total > MAX_UPLOAD_BYTES:
-                path.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail="Upload exceeds the 20 MiB demo limit",
-                )
-            target.write(chunk)
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as target:
+            path = Path(target.name)
+            while chunk := await upload.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="Upload exceeds the 20 MiB demo limit",
+                    )
+                target.write(chunk)
+    except BaseException:
+        # Close the handle before removing a rejected/interrupted upload on Windows.
+        if path is not None:
+            path.unlink(missing_ok=True)
+        raise
     return path, original_name, suffix
 
 
 @router.get("/health", summary="Check that the demo API is running")
 async def health() -> dict[str, str | bool]:
-    return {"status": "ok", "ocr_available": shutil.which("tesseract") is not None}
+    return {"status": "ok", "ocr_available": tesseract_environment()["english_available"]}
 
 
 @router.get("/architecture", summary="Show the separated processing stages")

@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib
+import csv
 from zipfile import BadZipFile
 
 import pymupdf as fitz
@@ -17,8 +18,12 @@ def parse_to_markdown(
     path: str | Path,
     source_name: str | None = None,
     schedule_kind: str | None = None,
+    pdf_backend: str | None = None,
 ) -> ParsedDocument:
     input_path = Path(path)
+    # Hash before and after extraction so provenance cannot describe different bytes.
+    with input_path.open("rb") as source:
+        original_digest = hashlib.file_digest(source, "sha256").hexdigest()
     suffix = input_path.suffix.casefold()
     if suffix != ".csv" and schedule_kind in {"full", "shared"}:
         raise ValueError("Full or Shared schedule type applies only to a schedule CSV")
@@ -26,14 +31,14 @@ def parse_to_markdown(
         if suffix == ".docx":
             result = parse_docx_to_markdown(input_path, source_name=source_name)
         elif suffix == ".pdf":
-            result = parse_pdf_to_markdown(input_path, source_name=source_name)
+            result = parse_pdf_to_markdown(input_path, source_name=source_name, backend=pdf_backend)
         elif suffix == ".csv":
             result = parse_csv_to_markdown(input_path, source_name=source_name, schedule_kind=schedule_kind)
         elif suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}:
             result = parse_image_to_markdown(input_path, source_name=source_name)
         else:
             raise ValueError("Input must be a DOCX, PDF, CSV, PNG, JPEG, TIFF, or BMP file")
-    except (fitz.FileDataError, BadZipFile, PackageNotFoundError) as error:
+    except (fitz.FileDataError, BadZipFile, PackageNotFoundError, csv.Error) as error:
         raise ValueError(f"The {suffix.lstrip('.').upper()} file is invalid or unreadable") from error
     # Read the original in blocks so a large file is never hashed in memory
     digest_builder = hashlib.sha256()
@@ -41,6 +46,8 @@ def parse_to_markdown(
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest_builder.update(block)
     digest = digest_builder.hexdigest()
+    if digest != original_digest:
+        raise ValueError("Source file changed during parsing; retry using an unchanged copy")
     is_schedule = False
     # The CSV header decides whether this is a schedule
     if suffix == ".csv":

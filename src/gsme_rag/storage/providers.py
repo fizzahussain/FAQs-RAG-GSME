@@ -19,6 +19,15 @@ class ProviderOperationError(RuntimeError):
     """Safe provider status that may be shown in a local job error."""
 
 
+def embedding_model_version(provider: str, dimension: int) -> str:
+    """Reading or publishing index metadata does not require an external client."""
+    if provider == "fake":
+        return f"test-hash-v1-{dimension}"
+    if provider != "cohere" or dimension not in CohereEmbeddings.SUPPORTED_DIMENSIONS:
+        raise ValueError("Unsupported embedding provider or dimension")
+    return f"cohere-embed-v5-pro-fast-{dimension}"
+
+
 class FakeEmbeddings:
     """Stable test vectors with no semantic meaning"""
 
@@ -26,14 +35,14 @@ class FakeEmbeddings:
 
     def __init__(self, dimension: int = 32):
         self.dimension = dimension
-        self.model_version = f"test-hash-v1-{dimension}"
+        self.model_version = embedding_model_version("fake", dimension)
         self.calls = 0
         import tiktoken
 
         self._encoder = tiktoken.get_encoding("cl100k_base")
 
     def encode_tokens(self, text: str) -> list[int]:
-        return self._encoder.encode(text)
+        return self._encoder.encode(text, disallowed_special=())
 
     def _vector(self, text: str) -> list[float]:
         values = []
@@ -64,9 +73,9 @@ class CohereEmbeddings:
             raise ValueError("Unsupported Cohere Embed 5 dimension")
         import cohere
 
-        self.client = cohere.ClientV2(api_key=key)
+        self.client = cohere.ClientV2(api_key=key, timeout=60.0)
         self.dimension = dimension
-        self.model_version = f"cohere-embed-v5-pro-fast-{dimension}"
+        self.model_version = embedding_model_version("cohere", dimension)
 
     def encode_tokens(self, text: str) -> list[int]:
         # The provider tokenizer runs only after the PostgreSQL approval check.
@@ -108,7 +117,11 @@ class CohereEmbeddings:
         vectors = response.embeddings.float
         if len(vectors) != len(texts) or any(len(vector) != self.dimension for vector in vectors):
             raise ValueError("Embedding count/dimension mismatch")
-        return [list(vector) for vector in vectors]
+        result = [list(vector) for vector in vectors]
+        if any(not all(math.isfinite(value) for value in vector) or not any(vector)
+               for vector in result):
+            raise ValueError("Embedding contains non-finite values or has zero magnitude")
+        return result
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return self._embed(texts, "embed-v5.0-pro", "search_document")

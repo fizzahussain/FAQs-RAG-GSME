@@ -18,12 +18,30 @@ def evaluate_cases(
     cases = fixture.get("cases", [])
     if not cases:
         raise ValueError("No reviewed question-to-evidence cases; cannot claim retrieval quality")
+    # Validate the whole case set before a query can leave the machine.
+    for case in cases:
+        if not case.get("tenant_id", "").strip() or not case.get("question", "").strip():
+            raise ValueError("Each evaluation case needs tenant_id and question")
+        if label == "source_reviewed":
+            expected = case.get("expected_evidence", [])
+            if not expected:
+                raise ValueError("Source-reviewed cases must pin expected_evidence by version, chunk and source hash")
+            for item in expected:
+                if not all(item.get(key) for key in ("version_id", "chunk_id", "source_sha256")):
+                    raise ValueError("Expected evidence needs version_id, chunk_id and source_sha256")
+                inspected = store.inspect_version(case["tenant_id"], item["version_id"], 1)
+                if (not inspected or inspected["version"]["source_sha256"] != item["source_sha256"]
+                        or not store.is_source_current_approved(case["tenant_id"], item["version_id"], item["chunk_id"])):
+                    raise ValueError("Expected source evidence is unavailable, unapproved or superseded")
+        elif not case.get("expected_chunk_ids"):
+            raise ValueError("Every question must have reviewed expected evidence IDs")
     # Synthetic scores check the pipeline and never represent source quality
     times = []
     results = []
     invalid_returned = 0
     for case in cases:
-        expected = set(case["expected_chunk_ids"])
+        expected = ({(item["version_id"], item["chunk_id"]) for item in case["expected_evidence"]}
+                    if label == "source_reviewed" else set(case["expected_chunk_ids"]))
         if not expected:
             raise ValueError("Every question must have reviewed expected evidence IDs")
         start = time.perf_counter()
@@ -38,7 +56,8 @@ def evaluate_cases(
             hybrid=hybrid,
         )
         times.append((time.perf_counter() - start) * 1000)
-        ranked = [hit["chunk_id"] for hit in found]
+        ranked = ([(hit["version_id"], hit["chunk_id"]) for hit in found]
+                  if label == "source_reviewed" else [hit["chunk_id"] for hit in found])
         invalid_returned += sum(
             not store.is_source_current_approved(
                 case["tenant_id"], hit["version_id"], hit["chunk_id"]
