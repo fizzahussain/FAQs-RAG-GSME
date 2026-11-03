@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gsme-rag"
-version = "0.15.5"
+version = "0.16.0"
 description = "Inspectable GSME RAG parsing, reviewed storage and evidence retrieval"
 readme = "README.md"
 requires-python = ">=3.11"

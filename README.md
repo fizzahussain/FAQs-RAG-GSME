@@ -1,6 +1,6 @@
 # GSME Muse document pipeline
 
-Version 0.15.5 prepares reviewed GSME/Muse FAQ and technical-document evidence for retrieval. It parses source files, creates source-linked chunks, records human review in PostgreSQL, and stores approved embeddings in Qdrant. Evidence search returns source text and citations. Answer generation and target-corpus retrieval evaluation are the next stage.
+Version 0.16.0 prepares and retrieves reviewed GSME/Muse FAQ and technical-document evidence. It parses source files, creates source-linked chunks, records human review in PostgreSQL, and stores approved embeddings in Qdrant. Retrieval combines semantic/keyword candidates with mandatory reranking and returns source-linked evidence. Conversational answer generation and representative GSME quality evaluation remain separate work.
 
 | Input | Processing |
 | --- | --- |
@@ -31,6 +31,8 @@ docker compose -f compose.local.yaml up -d
 
 Open **http://127.0.0.1:8010/**. This local FastAPI console contains the upload, parsing, review, storage, embedding-preview and evidence-search workflow. Use the reviewer name and token from `.env`. Start with `examples/synthetic_reviewed_faq.docx` and fake vectors to test the workflow. Choose Cohere for real embeddings once source review and external-content permission are in place. [Step-by-step instructions](docs/STORAGE_INCREMENT.md).
 
+Section 4 now provides **mandatory-reranked retrieval**, exact source filters, a before/after ranking comparison, citations and timings. Real reranking additionally requires `GSME_RERANK_CONTENT_APPROVED=yes` and the interface's send-content confirmation. Fake reranking is a clearly labelled workflow fixture. [Retrieval setup, demo and evaluation](docs/RETRIEVAL.md).
+
 The smaller parsing-only demo remains available with `python -m gsme_rag.api.run` at `http://127.0.0.1:8000/`. It is the only app deployed by `Dockerfile`/`render.yaml`. The local operator console binds to loopback and has its own authenticated API at `/docs`.
 
 ## OCR and complex PDFs
@@ -59,5 +61,6 @@ The service tests require `GSME_TEST_DATABASE_URL` pointing to an isolated datab
 - [Current audit, fixes and remaining source work](docs/PROJECT_AUDIT.md)
 - [Architecture and evidence contract](docs/TECHNICAL_GUIDE.md)
 - [Storage and console runbook](docs/STORAGE_INCREMENT.md)
+- [Retrieval and mandatory reranking](docs/RETRIEVAL.md)
 
 Historical audit notes are available through Git history; the repository keeps the current operating documentation.

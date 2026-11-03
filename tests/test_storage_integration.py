@@ -359,3 +359,77 @@ class StorageIntegrationTests(TestCase):
         )
         self.assertTrue(all(h["version_id"] == newer["version_id"] for h in hits))
         self.assertGreaterEqual(reconcile(self.store, self.vectors, self.provider.model_version), 1)
+
+    def test_mandatory_reranked_hybrid_uses_real_keyword_index_and_source_filters(self):
+        from gsme_rag.retrieval import RetrievalOptions, retrieve
+        from gsme_rag.retrieval.reranking import FakeReranker
+        first = self._approved_faq()
+        vectors = QdrantEvidence(QDRANT, self.vectors.collection, 32, hybrid=True)
+        options = RetrievalOptions(document_id=str(first["document_id"]), source_file="synthetic_reviewed_faq.docx")
+        result = retrieve(self.store, vectors, self.provider, FakeReranker(), self.settings,
+                          self.tenant, "What is the synthetic approval deadline?", options)
+        self.assertEqual(result["reranking_status"], "completed")
+        self.assertEqual(result["results"][0]["chunk_id"], first["chunk_id"])
+        self.assertIn("text", vectors.client.get_collection(vectors.collection).payload_schema)
+        self.assertEqual(retrieve(self.store, vectors, self.provider, FakeReranker(), self.settings,
+            self.other, "deadline", options)["status"], "no_eligible_evidence")
+        missing = RetrievalOptions(source_file="not-this-source.pdf")
+        self.assertEqual(retrieve(self.store, vectors, self.provider, FakeReranker(), self.settings,
+            self.tenant, "deadline", missing)["status"], "no_eligible_evidence")
+        from gsme_rag.retrieval.evaluation import draft_cases
+        draft = draft_cases(self.store, self.tenant, first["version_id"])
+        self.assertEqual(draft["source"], "draft")
+        self.assertEqual(draft["cases"][0]["expected_evidence"][0]["chunk_id"], first["chunk_id"])
+
+    def test_revocation_during_network_reranking_hides_diagnostic_text(self):
+        from gsme_rag.retrieval import RetrievalOptions, retrieve
+        from gsme_rag.retrieval.reranking import FakeReranker
+        first = self._approved_faq()
+        store, tenant = self.store, self.tenant
+        class RevokingReranker(FakeReranker):
+            def rank(self, question, documents):
+                ranking = super().rank(question, documents)
+                store.record_review(tenant, first["version_id"], first["chunk_id"], "rejected",
+                                     "synthetic-fixture", "Revoked during ranking", False)
+                return ranking
+        result = retrieve(self.store, self.vectors, self.provider, RevokingReranker(), self.settings,
+                          self.tenant, "deadline", RetrievalOptions(strategy="dense"))
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["initial_candidates"], [])
+        self.assertEqual(result["status"], "evidence_changed_during_retrieval")
+
+    def test_real_split_faq_expansion_never_imports_unapproved_middle_parts(self):
+        from docx import Document
+        from gsme_rag.retrieval import RetrievalOptions, retrieve
+        from gsme_rag.retrieval.reranking import FakeReranker
+        source = Path(self.temp.name) / "synthetic_long_faq.docx"
+        document = Document()
+        document.add_heading("Synthetic procedures", 1)
+        document.add_heading("What is the synthetic long instruction?", 2)
+        document.add_paragraph(" ".join(f"Synthetic step {number}: preserve this complete source instruction and its context." for number in range(90)))
+        document.save(source)
+        submitted = self.store.submit(self.tenant, source, self.settings.data_dir)
+        self.assertEqual(process_ingestion(self.store, self.settings, submitted["job_id"])["state"], "review_needed")
+        chunks = self.store.inspect_version(self.tenant, submitted["version_id"])["chunks"]
+        self.assertGreater(len(chunks), 2)
+        self.assertEqual(len({chunk["unit_id"] for chunk in chunks}), 1)
+
+        def approve_and_index(selected):
+            for chunk in selected:
+                self.store.record_review(self.tenant, submitted["version_id"], chunk["source_chunk_id"],
+                    "approved", "synthetic-fixture", "Checked against the generated long FAQ", True)
+            self.store.publish(self.tenant, submitted["document_id"], submitted["version_id"],
+                               self.provider.model_version, self.vectors.collection)
+            process_index(self.store, self.vectors, self.provider, self.settings, self.tenant, submitted["version_id"])
+
+        approve_and_index([chunks[0], chunks[-1]])
+        options = RetrievalOptions(strategy="dense", top_k=1)
+        partial = retrieve(self.store, self.vectors, self.provider, FakeReranker(), self.settings,
+            self.tenant, "What is the synthetic long instruction?", options)
+        self.assertFalse(partial["results"][0]["context_complete"])
+        self.assertEqual(len(partial["results"][0]["context_parts"]), 2)
+        approve_and_index(chunks[1:-1])
+        complete = retrieve(self.store, self.vectors, self.provider, FakeReranker(), self.settings,
+            self.tenant, "What is the synthetic long instruction?", options)
+        self.assertTrue(complete["results"][0]["context_complete"])
+        self.assertEqual([part["part_index"] for part in complete["results"][0]["context_parts"]], list(range(len(chunks))))

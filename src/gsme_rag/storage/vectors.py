@@ -77,20 +77,25 @@ class QdrantEvidence:
         return {str(point.id): point.payload or {} for point in points}
 
     def query(self, tenant_id: str, vector: list[float], limit: int, *, text: str | None = None,
-              model_version: str | None = None):
+              model_version: str | None = None, point_ids: list[str] | None = None):
         if (len(vector) != self.dimension or not all(math.isfinite(value) for value in vector)
                 or not any(vector)):
             raise ValueError("Query vector is invalid")
         if not self.client.collection_exists(self.collection):
+            return []
+        if point_ids is not None and not point_ids:
             return []
         filter_ = models.Filter(
             must=[models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id))]
         )
         if model_version:
             filter_.must.append(models.FieldCondition(key="model_version", match=models.MatchValue(value=model_version)))
+        if point_ids is not None:
+            filter_.must.append(models.HasIdCondition(has_id=point_ids))
         if text is not None:
             if not self.hybrid:
                 raise ValueError("Hybrid search was not enabled")
+            self.ensure_collection()
             # RRF combines vector and keyword rankings from the same collection
             result = self.client.query_points(
                 self.collection,

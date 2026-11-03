@@ -1,5 +1,6 @@
-"""Output versions are part of provenance and invalidate older parse approvals."""
+"""Version extraction and retrieval separately; ranking changes need no reparse."""
 
-__version__ = "0.15.5"
-PARSER_VERSION = __version__
-CHUNKER_VERSION = __version__
+__version__ = "0.16.0"
+PARSER_VERSION = "0.15.5"
+CHUNKER_VERSION = "0.15.5"
+RETRIEVAL_VERSION = "0.16.0"

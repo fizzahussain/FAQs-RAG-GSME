@@ -231,7 +231,7 @@ class EvidenceStore:
                 """SELECT c.source_chunk_id,c.evidence_text,c.source_page_start,
                 c.source_page_end,c.source_anchor,c.warning_codes,c.parser_backend,
                 c.category,c.chunk_type,c.review_required,c.evidence_status,c.heading_path,
-                c.chunk_index,c.unit_id,c.part_index,c.part_count,
+                c.chunk_index,c.unit_id,c.part_index,c.part_count,c.faq_question,c.table_row_number,
                 COALESCE((SELECT jsonb_agg(jsonb_build_object('model_version',j.model_version,
                   'collection',j.collection_name,'state',j.state,'last_error',j.last_error,
                   'retryable',j.retryable,'attempts',j.attempt_count,'next_attempt_at',j.next_attempt_at))
@@ -730,13 +730,45 @@ class EvidenceStore:
                  c.source_page_start,c.source_page_end,c.category,c.table_row_number,
                  c.document_id,c.version_id,c.source_file,c.source_sha256,c.heading_path,
                  c.faq_question,c.unit_id,c.part_index,c.part_count,c.review_required,
-                 c.parser_backend,c.parser_version,c.chunker_version
+                 c.parser_backend,c.parser_version,c.chunker_version,c.chunk_type,c.chunk_index,
+                 c.warning_codes,c.source_anchor,c.approval_order
                  FROM approved_current_evidence c JOIN index_jobs j ON j.chunk_id=c.id
                  WHERE c.tenant_id=%s AND j.point_id=ANY(%s) AND j.model_version=%s
                    AND j.collection_name=%s AND j.state='indexed'""",
                 (tenant_id, [UUID(i) for i in point_ids], model_version, collection_name),
             ).fetchall()
             return {str(row["point_id"]): row for row in rows}
+
+    def retrieval_scope(self, tenant_id: str, model_version: str, collection_name: str,
+                        document_id: str | None = None, category: str | None = None,
+                        source_file: str | None = None) -> list[str]:
+        """Authoritative point prefilter, including exact optional source facets."""
+        query = """SELECT j.point_id FROM approved_current_evidence c
+            JOIN index_jobs j ON j.chunk_id=c.id WHERE c.tenant_id=%s
+            AND j.model_version=%s AND j.collection_name=%s AND j.state='indexed'"""
+        values = [tenant_id, model_version, collection_name]
+        for field, value in (("document_id", document_id), ("category", category), ("source_file", source_file)):
+            if value is not None:
+                query += f" AND c.{field}=%s"  # Names are fixed above; user values are parameters.
+                values.append(value)
+        with self.connect() as db:
+            rows = db.execute(query + " LIMIT 100001", values).fetchall()
+            if len(rows) > 100000:
+                raise ValueError("Retrieval scope exceeds 100000 points; narrow document/category filters")
+            return [str(row["point_id"]) for row in rows]
+
+    def retrieval_parts(self, tenant_id: str, version_id: str, unit_id: str,
+                        model_version: str, collection_name: str) -> list[str]:
+        # Bound context expansion. Missing, unindexed, revoked or excess parts
+        # make context incomplete; they are never silently represented as whole.
+        with self.connect() as db:
+            rows = db.execute("""SELECT j.point_id FROM approved_current_evidence c
+                JOIN index_jobs j ON j.chunk_id=c.id WHERE c.tenant_id=%s
+                AND c.version_id=%s AND c.unit_id=%s AND j.model_version=%s
+                AND j.collection_name=%s AND j.state='indexed'
+                ORDER BY c.part_index LIMIT 20""",
+                (tenant_id, version_id, unit_id, model_version, collection_name)).fetchall()
+            return [str(row["point_id"]) for row in rows]
 
     def has_indexed_evidence(self, tenant_id: str, model_version: str, collection_name: str) -> bool:
         with self.connect() as db:

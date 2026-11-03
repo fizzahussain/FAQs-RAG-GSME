@@ -15,12 +15,18 @@ class Settings:
     worker_batch: int = 8
     lease_seconds: int = 300  # A worker heartbeats this lease while a long task runs.
     hybrid_enabled: bool = False
+    rerank_model: str = "rerank-v5.0-pro"
+    rerank_timeout: float = 30.0
+    rerank_input_budget: int = 8192
 
     def __post_init__(self):
         if not 1 <= self.dimension <= 2048 or not 1 <= self.batch_size <= 96 or not 1 <= self.worker_batch <= 64:
             raise ValueError("Invalid dimension or bounded worker batch size")
         if not 1 <= self.max_tokens <= 128000 or self.lease_seconds < 30:
             raise ValueError("Invalid token budget or lease")
+        if (self.rerank_model not in {"rerank-v5.0-pro", "rerank-v5.0-fast"}
+                or not 1 <= self.rerank_timeout <= 120 or not 1024 <= self.rerank_input_budget <= 8192):
+            raise ValueError("Invalid rerank model, timeout or conservative input budget")
 
 
 def from_env() -> Settings:
@@ -40,4 +46,7 @@ def from_env() -> Settings:
         batch_size=int(os.getenv("GSME_EMBED_BATCH", "16")),
         worker_batch=int(os.getenv("GSME_WORKER_BATCH", "8")),
         hybrid_enabled=os.getenv("GSME_HYBRID", "false").lower() == "true",
+        rerank_model=os.getenv("GSME_RERANK_MODEL", "rerank-v5.0-pro"),
+        rerank_timeout=float(os.getenv("GSME_RERANK_TIMEOUT", "30")),
+        rerank_input_budget=int(os.getenv("GSME_RERANK_INPUT_BUDGET", "8192")),
     )

@@ -15,6 +15,9 @@ from gsme_rag.storage.pipeline import process_ingestion, process_index, reconcil
 from gsme_rag.storage.providers import CohereEmbeddings, FakeEmbeddings, embedding_model_version
 from gsme_rag.storage.vectors import QdrantEvidence
 from gsme_rag.storage.evaluate import evaluate_cases
+from gsme_rag.retrieval import RetrievalOptions, retrieve
+from gsme_rag.retrieval.reranking import CohereReranker, FakeReranker
+from gsme_rag.retrieval.evaluation import evaluate_retrieval, draft_cases
 
 
 def _json(value):
@@ -28,6 +31,9 @@ def main():
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("migrate")
+    draft = commands.add_parser("draft-evaluation", help="Print unverified FAQ benchmark suggestions; no model calls")
+    draft.add_argument("--tenant", required=True)
+    draft.add_argument("--version-id", required=True)
     submit = commands.add_parser("submit")
     submit.add_argument("file", type=Path)
     submit.add_argument("--tenant", required=True)
@@ -75,6 +81,25 @@ def main():
     search.add_argument("--tenant", required=True)
     search.add_argument("--provider", choices=("fake", "cohere"), default="cohere")
     search.add_argument("--hybrid", action="store_true")
+    retrieval = commands.add_parser("retrieve", help="Mandatory-reranked document evidence; does not generate an answer")
+    retrieval.add_argument("question")
+    retrieval.add_argument("--tenant", required=True)
+    retrieval.add_argument("--provider", choices=("fake", "cohere"), default="cohere")
+    retrieval.add_argument("--strategy", choices=("dense", "hybrid"), default="hybrid")
+    retrieval.add_argument("--top-k", type=int, default=5)
+    retrieval.add_argument("--candidates", type=int, default=30)
+    retrieval.add_argument("--document-id")
+    retrieval.add_argument("--category")
+    retrieval.add_argument("--source-file")
+    retrieval.add_argument("--context-chars", type=int, default=16000)
+    retrieval.add_argument("--min-rerank-score", type=float)
+    retrieval.add_argument("--confirm-external", action="store_true")
+    retrieval_eval = commands.add_parser("evaluate-retrieval", help="Pinned before/after ranking benchmark")
+    retrieval_eval.add_argument("cases", type=Path)
+    retrieval_eval.add_argument("--provider", choices=("fake", "cohere"), default="fake")
+    retrieval_eval.add_argument("--strategy", choices=("dense", "hybrid"), default="hybrid")
+    retrieval_eval.add_argument("--min-rerank-score", type=float)
+    retrieval_eval.add_argument("--confirm-external", action="store_true")
     schedule = commands.add_parser("schedules")
     schedule.add_argument("--tenant", required=True)
     schedule.add_argument("--kind", choices=("full", "shared"), required=True)
@@ -101,6 +126,26 @@ def main():
             parser.error("Cohere indexing requires --tenant and --version-id")
     settings = from_env()
     store = EvidenceStore(settings.database_url)
+    if args.command == "draft-evaluation":
+        _json(draft_cases(store, args.tenant, args.version_id))
+        return
+    if args.command in ("retrieve", "evaluate-retrieval"):
+        if args.provider == "cohere" and not args.confirm_external:
+            parser.error("--confirm-external is required to send queries/approved passages to Cohere")
+        provider = FakeEmbeddings(settings.dimension) if args.provider == "fake" else CohereEmbeddings(settings.dimension)
+        reranker = FakeReranker() if args.provider == "fake" else CohereReranker(
+            settings.rerank_model, settings.rerank_timeout, settings.rerank_input_budget)
+        vectors = QdrantEvidence(settings.qdrant_url,
+            settings.collection + ("_synthetic" if args.provider == "fake" else ""),
+            settings.dimension, hybrid=args.strategy == "hybrid")
+        if args.command == "evaluate-retrieval":
+            _json(evaluate_retrieval(store, vectors, provider, reranker, settings, args.cases,
+                                     args.strategy, args.min_rerank_score))
+        else:
+            options = RetrievalOptions(args.top_k, args.candidates, args.strategy, args.document_id,
+                                       args.category, args.source_file, args.context_chars, args.min_rerank_score)
+            _json(retrieve(store, vectors, provider, reranker, settings, args.tenant, args.question, options))
+        return
     if args.command == "migrate":
         _json({"applied": store.migrate()})
         return

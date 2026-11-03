@@ -33,6 +33,8 @@ from gsme_rag.storage.vectors import QdrantEvidence
 from gsme_rag.storage.files import checksum
 from gsme_rag.version import __version__
 from gsme_rag.parsing.ocr import tesseract_environment
+from gsme_rag.retrieval import RetrievalOptions, retrieve
+from gsme_rag.retrieval.reranking import CohereReranker, FakeReranker
 
 
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
@@ -70,6 +72,27 @@ class SearchRequest(BaseModel):
     provider: Literal["fake", "cohere"] = "cohere"
     limit: int = Field(default=5, ge=1, le=20)
     hybrid: bool = False
+
+
+class RetrievalRequest(BaseModel):
+    tenant: Tenant
+    question: str = Field(default="", max_length=20000)
+    provider: Literal["fake", "cohere"] = "cohere"
+    confirm_external: bool = False
+    route: Literal["documents", "schedules", "mixed"] = "documents"
+    strategy: Literal["dense", "hybrid"] = "hybrid"
+    top_k: int = Field(default=5, ge=1, le=20)
+    candidate_count: int = Field(default=30, ge=1, le=100)
+    context_chars: int = Field(default=16000, ge=1800, le=64000)
+    min_rerank_score: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    document_id: Identifier | None = None
+    category: str | None = Field(default=None, min_length=1, max_length=300)
+    source_file: str | None = Field(default=None, min_length=1, max_length=300)
+    schedule_kind: Literal["full", "shared"] | None = None
+    schedule_limit: int = Field(default=100, ge=1, le=999)
+    technology_nm: int | None = Field(default=None, ge=1, le=2147483647)
+    flavor: str | None = Field(default=None, min_length=1, max_length=300)
+    tapeout_on_or_after: date | None = None
 
 
 def _provider(name: str, settings: Settings):
@@ -295,6 +318,55 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
         vectors = _vectors(body.provider, settings)
         return _safe(lambda: search_evidence(store, vectors, provider, settings, body.tenant,
                                              body.question, body.limit, body.hybrid))
+
+    @app.post("/api/retrieve", dependencies=[Depends(authorize)])
+    def retrieval(body: RetrievalRequest):
+        """Explicit routes avoid guessing schedule kind, dates or technical values."""
+        if body.route in {"schedules", "mixed"} and body.schedule_kind is None:
+            return {"route": body.route, "status": "clarification_needed", "results": [],
+                    "message": "Select Full or Shared schedule kind; it will not be inferred"}
+        if body.route == "schedules" and (body.category or body.source_file):
+            raise HTTPException(400, "Category/source-file filters apply to document retrieval only")
+        if body.route != "schedules" and (body.schedule_kind is not None or body.technology_nm is not None
+                                          or body.flavor is not None or body.tapeout_on_or_after is not None):
+            if body.route != "mixed":
+                raise HTTPException(400, "Schedule filters require the schedules or mixed route")
+        schedule_rows = []
+        if body.route in {"schedules", "mixed"}:
+            schedule_rows = store.schedules(body.tenant, body.schedule_kind,
+                technology_nm=body.technology_nm, flavor=body.flavor,
+                tapeout_on_or_after=body.tapeout_on_or_after,
+                document_id=body.document_id if body.route == "schedules" else None,
+                limit=body.schedule_limit + 1)
+        schedule_has_more = len(schedule_rows) > body.schedule_limit
+        schedule_rows = schedule_rows[:body.schedule_limit]
+        if body.route == "schedules":
+            return {"route": "schedules", "status": "results" if schedule_rows else "no_matching_rows",
+                    "reranking_status": "not_applicable_exact_sql", "results": schedule_rows,
+                    "schedule_kind": body.schedule_kind, "has_more": schedule_has_more,
+                    "limit": body.schedule_limit, "answerability": "not_assessed"}
+        if body.provider == "cohere" and not body.confirm_external:
+            raise HTTPException(400, "Confirm sending the question and approved passages to Cohere for retrieval/reranking")
+        options = _safe(lambda: RetrievalOptions(body.top_k, body.candidate_count, body.strategy,
+                        body.document_id, body.category, body.source_file, body.context_chars, body.min_rerank_score))
+        provider = _safe(lambda: _provider(body.provider, settings))
+        reranker = _safe(lambda: FakeReranker() if body.provider == "fake" else CohereReranker(
+            settings.rerank_model, settings.rerank_timeout, settings.rerank_input_budget))
+        # The new endpoint provisions the native keyword index when requested;
+        # the old GSME_HYBRID switch still controls baseline-search experiments.
+        vectors = QdrantEvidence(settings.qdrant_url,
+            settings.collection + ("_synthetic" if body.provider == "fake" else ""),
+            settings.dimension, hybrid=body.strategy == "hybrid")
+        try:
+            result = _safe(lambda: retrieve(store, vectors, provider, reranker, settings,
+                                            body.tenant, body.question, options))
+        finally:
+            vectors.client.close()
+        if body.route == "mixed":
+            result.update(route="mixed", schedule_rows=schedule_rows,
+                          schedule_has_more=schedule_has_more, schedule_limit=body.schedule_limit,
+                          schedule_status="results" if schedule_rows else "no_matching_rows")
+        return result
 
     @app.get("/api/embedding/{source_chunk_id}", dependencies=[Depends(authorize)])
     def embedding(source_chunk_id: str, tenant: Tenant, version_id: Identifier,

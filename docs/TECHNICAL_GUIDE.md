@@ -1,6 +1,6 @@
 # Architecture and evidence contract
 
-Version 0.15.5. The reusable boundary for the next retrieval stage is `storage.pipeline.search_evidence()`: it returns currently approved source evidence with citations after rechecking PostgreSQL. It does not compose an answer.
+Version 0.16.0. The reusable retrieval boundary is `retrieval.service.retrieve()`: it searches approved evidence, mandates reranking, assembles bounded source-linked context and rechecks PostgreSQL. `storage.pipeline.search_evidence()` remains an explicitly unreranked diagnostic baseline. Neither composes an answer. Parser/chunker identities remain 0.15.5 because their algorithms are unchanged in this increment.
 
 ## Source to evidence
 
@@ -37,6 +37,8 @@ Fake vectors are deterministic workflow fixtures in a separate `_synthetic` coll
 `repair_missing_vectors()` compares scoped approved index jobs with Qdrant and queues missing points. It makes no embedding call itself; the normal worker still checks approval and external permission. Source-reviewed evaluation cases must identify expected evidence by version ID, chunk ID and source hash.
 
 ## Application boundaries
+
+The authenticated `/api/retrieve` endpoint and CLI `retrieve` support dense/hybrid candidate strategies followed by mandatory Cohere reranking (or paired synthetic providers for tests). PostgreSQL scope IDs prefilter Qdrant; exact document/category/filename facets cannot be silently lost behind unrelated hits. Same-unit expansion never imports arbitrary unapproved neighbors. Diagnostic text is revalidated too if approval changes during the rerank call. Routes for exact schedules and mixed requests keep SQL rows separate from ranked passages. See [the retrieval contract and benchmark workflow](RETRIEVAL.md).
 
 The local console serves all document preparation and storage operations at `127.0.0.1:8010`. Its token, reviewer allowlist, origin checks and loopback bind are workstation controls. The public parsing demo has no review or storage routes. Docker copies only source/package files and excludes local secrets and data. PostgreSQL and Qdrant Compose ports bind to loopback.
 

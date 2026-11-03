@@ -19,11 +19,13 @@ Open **http://127.0.0.1:8010/**. The server loads `.env` at startup, so restart 
 
 ## Local evidence console
 
+Version 0.16.0 adds mandatory reranking in section 4 without a new SQL migration. See [retrieval setup and evaluation](RETRIEVAL.md), including the separate `GSME_RERANK_CONTENT_APPROVED` permission. The old unreranked search remains a labelled diagnostic baseline. Existing 0.15.5 parser/chunker identities and embeddings remain valid.
+
 1. Enter the token, workspace `local-test`, and the exact reviewer ID configured in `.env`. Check connection to verify PostgreSQL and Qdrant are reachable.
 2. Upload a small FAQ DOCX, PDF or `examples/synthetic_reviewed_faq.docx`. Click **Parse uploaded job**. For a new version of an existing document, supply its document ID before upload.
 3. Load the chunks, download the original and inspect Markdown/warnings. Navigate through chunks in source order. For each chunk you checked, write a review note describing the page/paragraph and result, tick that chunk's source-check box, and approve. Reject uncertain content. A missing source answer must stay missing.
 4. Select Fake vectors for a workflow test or Cohere for real embeddings. Click **Publish approved version**; this queues only source-approved evidence. For Cohere also enable external permission in `.env` and tick the send-content box. Click **Index one batch**, then inspect job states. Repeat while queued jobs remain. Zero newly indexed does not prove all jobs succeeded: failures, retries and next-attempt times are displayed with each chunk.
-5. Embedding preview becomes available for a currently approved indexed chunk with the selected provider. It shows model, point identity, dimension and a short coordinate sample. Those coordinates do not explain semantic meaning. Search an answerable question and check its returned text and source citation.
+5. Embedding preview becomes available for a currently approved indexed chunk with the selected provider. It shows model, point identity, dimension and a short coordinate sample. Those coordinates do not explain semantic meaning. In section 4, select candidate strategy/count, confirm external processing for Cohere, then click **Retrieve and rerank**. Compare initial and reranked positions, inspect cited context and warnings. Results are evidence candidates, not generated answers or calibrated confidence.
 6. Reject an approved chunk to revoke it. Search immediately excludes it. **Clean stale vectors** removes the stale Qdrant point. Publishing a new document version similarly removes the previous version from authoritative search immediately.
 
 If PostgreSQL says a chunk is indexed but its Qdrant point was lost, use **Check for missing stored vectors**. It requeues missing points in the selected tenant/version/provider; the separate Index action recreates them after the normal approval checks.

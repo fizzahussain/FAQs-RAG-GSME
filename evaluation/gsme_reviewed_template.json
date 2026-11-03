@@ -1,5 +1,5 @@
 {
   "source": "source_reviewed",
   "cases": [],
-  "instructions": "Each reviewed case needs question, tenant_id and expected_evidence: [{version_id, chunk_id, source_sha256}]. Pin currently published source-approved evidence. Leave cases empty until source review; an empty template is not a benchmark."
+  "instructions": "Each positive reviewed case needs question, tenant_id and expected_evidence: [{version_id, chunk_id, source_sha256}]. Pin currently published source-approved evidence. evaluate-retrieval also accepts negative cases with expect_no_answer=true instead of expected evidence, and optional RetrievalOptions filters. Legacy evaluate accepts positive cases only. Leave cases empty until source review; an empty template is not a benchmark. See docs/RETRIEVAL.md."
 }

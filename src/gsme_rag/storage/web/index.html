@@ -56,10 +56,25 @@
   <pre id="indexInfo"></pre><pre id="embeddingInfo"></pre>
 </section>
 <section>
-  <h2>4. Test evidence search</h2>
-  <p>Search returns approved source text and citations. Fake vectors test the workflow; use Cohere to assess semantic matches.</p>
+  <h2>4. Retrieval with mandatory reranking</h2>
+  <p>This returns evidence, not an AI-written answer. Fake embeddings/reranking test plumbing only. Use Cohere for real relevance assessment.</p>
   <label for="question">Question about an approved source</label><input id="question">
-  <button id="search">Search evidence</button><pre id="results"></pre>
+  <div class="grid">
+    <div><label for="retrievalStrategy">Candidate search</label><select id="retrievalStrategy"><option value="hybrid">Hybrid: semantic + keyword (RRF)</option><option value="dense">Semantic only (still reranked)</option></select></div>
+    <div><label for="candidateCount">Candidate passages</label><input id="candidateCount" type="number" min="1" max="100" value="30"></div>
+    <div><label for="topK">Final results</label><input id="topK" type="number" min="1" max="20" value="5"></div>
+    <div><label for="retrievalDocument">Document ID filter (optional)</label><input id="retrievalDocument"></div>
+    <div><label for="retrievalCategory">Exact category (optional)</label><input id="retrievalCategory"></div>
+    <div><label for="retrievalSource">Exact source filename (optional)</label><input id="retrievalSource"></div>
+  </div>
+  <label><input id="retrievalExternal" type="checkbox"> Permit this question and approved candidate passages to be sent to Cohere</label>
+  <button id="retrieve">Retrieve and rerank</button>
+  <p class="muted">Ranking scores are not factual confidence. No default answerability threshold has been calibrated.</p>
+  <pre id="retrievalInfo"></pre><div id="rankingComparison"></div><div id="retrievalResults"></div>
+  <details><summary>Before / after rankings and complete response</summary><pre id="retrievalTrace"></pre></details>
+  <details><summary>Diagnostic baseline without reranking (not the retrieval pipeline)</summary>
+    <button id="search">Run semantic baseline only</button><pre id="results"></pre>
+  </details>
 </section>
 <section>
   <h2>Exact schedule search</h2>

@@ -117,11 +117,16 @@ class AdminIntegrationTests(TestCase):
                              "question": "What is the synthetic approval deadline?"}
                     hits = client.post("/api/search", headers=headers, json=query).json()
                     self.assertEqual(hits[0]["chunk_id"], chunk["source_chunk_id"])
+                    reranked = client.post("/api/retrieve", headers=headers, json=query)
+                    self.assertEqual(reranked.status_code, 200, reranked.text)
+                    self.assertEqual(reranked.json()["reranking_status"], "completed")
+                    self.assertEqual(reranked.json()["results"][0]["chunk_id"], chunk["source_chunk_id"])
                     self.assertEqual(client.post("/api/search", headers=headers,
                                                  json={**query, "tenant": "wrong"}).json(), [])
                     review.update(decision="rejected", rationale="Revoked", source_verified=False)
                     self.assertEqual(client.post("/api/review", headers=headers, json=review).status_code, 200)
                     self.assertEqual(client.post("/api/search", headers=headers, json=query).json(), [])
+                    self.assertEqual(client.post("/api/retrieve", headers=headers, json=query).json()["status"], "no_eligible_evidence")
                     self.assertEqual(client.get(f"/api/embedding/{chunk['source_chunk_id']}?tenant={tenant}&version_id={version_id}&provider=fake",
                                                 headers=headers).status_code, 404)
                     self.assertEqual(client.post("/api/reconcile", headers=headers, json=body).json()["deleted"], 1)

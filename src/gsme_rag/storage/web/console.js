@@ -123,7 +123,10 @@ el("versionPicker").onchange = () => run(async () => { const option = el("versio
 el("inspect").onclick = () => run(async () => { offset = 0; await loadInspection(); });
 el("previous").onclick = () => run(async () => { offset = Math.max(0,offset-50); await loadInspection(); });
 el("next").onclick = () => run(async () => { if (nextOffset !== null) { offset=nextOffset; await loadInspection(); } });
-el("provider").onchange = () => { el("external").checked = false; updateControls(); };
+el("provider").onchange = () => { el("external").checked = false; el("retrievalExternal").checked = false; updateControls(); };
+for (const input of ["question","tenant","retrievalDocument","retrievalCategory","retrievalSource"]) {
+  el(input).addEventListener("input",()=>{ el("retrievalExternal").checked=false; });
+}
 el("markdown").onclick = () => run(async () => show("artifact", await (await api(versionPath("markdown"))).text()));
 el("manifest").onclick = () => run(async () => show("artifact", await json(versionPath("manifest"))));
 el("source").onclick = () => run(async () => {
@@ -137,6 +140,56 @@ el("reconcile").onclick = () => run(async () => { show("indexInfo", await json("
 el("repair").onclick = () => run(async () => { show("indexInfo", await json("repair", identifiers())); await loadInspection(); });
 el("search").onclick = () => run(async () => { const hits = await json("search",{tenant:value("tenant"),question:value("question"),provider:value("provider")});
   show("results", hits.length ? hits : "No approved indexed evidence matched in this workspace and provider."); });
+el("retrieve").onclick = () => run(async () => {
+  el("retrievalResults").replaceChildren(); el("rankingComparison").replaceChildren(); show("retrievalInfo", "Retrieving approved candidates and reranking..."); show("retrievalTrace", "");
+  const body = {tenant:value("tenant"), question:value("question"), provider:value("provider"),
+    confirm_external:el("retrievalExternal").checked, strategy:value("retrievalStrategy"),
+    candidate_count:Number(value("candidateCount")), top_k:Number(value("topK"))};
+  for (const [input, field] of [["retrievalDocument","document_id"],["retrievalCategory","category"],["retrievalSource","source_file"]])
+    if (value(input)) body[field] = value(input);
+  let response;
+  try { response = await json("retrieve",body); }
+  catch (error) { show("retrievalInfo", "Retrieval failed. No unreranked fallback was returned."); throw error; }
+  show("retrievalInfo", {status:response.status, synthetic:response.synthetic, strategy:response.strategy,
+    reranking:response.reranking_status, model:response.reranker_model, candidates:response.candidate_count,
+    timings_ms:response.timings_ms, warnings:response.warnings, note:response.note});
+  show("retrievalTrace",response);
+  if (response.reranked_candidates.length) {
+    const table=document.createElement("table"), head=document.createElement("tr");
+    for (const label of ["Source / chunk", "Initial rank", "Rerank position", "Relevance (not confidence)"]) {
+      const cell=document.createElement("th"); cell.textContent=label; head.append(cell);
+    }
+    table.append(head);
+    for (const item of response.reranked_candidates) {
+      const row=document.createElement("tr");
+      for (const content of [`${item.source_file} | ${item.chunk_id}`, item.retrieval_rank, item.rerank_rank, item.rerank_score.toFixed(4)]) {
+        const cell=document.createElement("td"); cell.textContent=String(content); row.append(cell);
+      }
+      table.append(row);
+    }
+    el("rankingComparison").append(table);
+  }
+  for (const [index, item] of response.results.entries()) {
+    const card = document.createElement("div"); card.className="chunk";
+    const title = document.createElement("h3"); title.textContent=`Result ${index+1}: ${item.source_file}`;
+    const meta = document.createElement("p"); meta.textContent=`Candidate rank ${item.retrieval_rank} → rerank ${item.rerank_rank} | relevance ${item.rerank_score.toFixed(4)} (not confidence) | page ${item.page_start ?? "n/a"} | ${(item.heading_path || []).join(" / ")}`;
+    const text = document.createElement("pre"); text.textContent=item.context_parts.map(part=>
+      item.part_count > 1 ? `Part ${part.part_index+1}/${part.part_count} | page ${part.page_start ?? "n/a"} | ${part.chunk_id}\n${part.text}` : part.text).join("\n\n");
+    const provenance = document.createElement("p"); provenance.className="muted";
+    provenance.textContent=`Version ${item.version_id} | chunk ${item.chunk_id} | source SHA256 ${item.source_sha256}`;
+    const source = document.createElement("button"); source.textContent="Download cited original";
+    source.onclick=()=>run(async()=>{
+      const path="source/"+encodeURIComponent(item.version_id)+"?tenant="+encodeURIComponent(body.tenant);
+      const response=await api(path), url=URL.createObjectURL(await response.blob());
+      const link=document.createElement("a"); link.href=url; link.download=item.source_file; link.click();
+      setTimeout(()=>URL.revokeObjectURL(url),60000);
+    });
+    card.append(title,meta,text,provenance,source);
+    if (item.part_count > 1) { const expanded=document.createElement("p"); expanded.className="muted"; expanded.textContent="Approved unit parts are shown in source order. The rerank score applies to the matched passage; expanded parts are supporting context."; card.append(expanded); }
+    if (!item.context_complete) { const warning=document.createElement("p"); warning.className="error"; warning.textContent="Split answer context is incomplete: unavailable, unapproved, or over budget. Do not treat as a complete answer."; card.append(warning); }
+    el("retrievalResults").append(card);
+  }
+});
 el("schedules").onclick = () => run(async () => {
   const params = new URLSearchParams({tenant:value("tenant"),kind:value("kind")});
   for (const [input,parameter] of [["technology","technology_nm"],["flavor","flavor"],["tapeout","tapeout_on_or_after"]]) if(value(input)) params.set(parameter,value(input));
