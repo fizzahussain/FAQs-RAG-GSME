@@ -22,8 +22,97 @@ ENABLED = bool(DB and QDRANT and "/gsme_rag_test" in DB)
 
 
 class AdminBoundaryTests(TestCase):
+    def test_request_vector_clients_close_on_success_and_failures(self):
+        tenant, version, document = "t", str(uuid4()), str(uuid4())
+        store = Mock()
+        store.publish.return_value = 1
+        store.approved_point.return_value = None
+        vectors = Mock(collection="synthetic")
+        body = dict(tenant=tenant, version_id=version, document_id=document, provider="fake")
+        with patch.dict(os.environ, {"GSME_REVIEW_AUTH_TOKEN": TOKEN}), \
+             patch("gsme_rag.storage.admin._vectors", return_value=vectors) as make_vectors, \
+             patch("gsme_rag.storage.admin.process_index", return_value={"indexed": 0, "failed": 0}) as indexing, \
+             patch("gsme_rag.storage.admin.reconcile", return_value=0) as reconcile, \
+             patch("gsme_rag.storage.admin.repair_missing_vectors", return_value=0) as repair, \
+             patch("gsme_rag.storage.admin.search_evidence", return_value=[]) as search:
+            with TestClient(create_admin_app(self.settings, store), base_url="http://127.0.0.1:8010", client=("127.0.0.1", 1234)) as client:
+                headers = {"X-GSME-Token": TOKEN}
+                self.assertEqual(client.post("/api/publish", headers=headers, json=body).status_code, 200)
+                make_vectors.assert_not_called()
+                for path, operation in [("index", indexing), ("reconcile", reconcile), ("repair", repair), ("search", search)]:
+                    request = dict(tenant=tenant, provider="fake", question="Synthetic") if path == "search" else body
+                    for error in (False, True):
+                        with self.subTest(path=path, error=error):
+                            vectors.client.close.reset_mock()
+                            operation.side_effect = ValueError("Synthetic failure") if error else None
+                            response = client.post("/api/" + path, headers=headers, json=request)
+                            self.assertEqual(response.status_code, 400 if error else 200)
+                            vectors.client.close.assert_called_once()
+                    operation.side_effect = None
+                vectors.client.close.reset_mock()
+                response = client.get(f"/api/embedding/missing?tenant={tenant}&version_id={version}&provider=fake", headers=headers)
+                self.assertEqual(response.status_code, 404)
+                vectors.client.close.assert_called_once()
+
+    def test_product_home_separates_administration_and_library_is_scoped(self):
+        store = Mock()
+        store.library.return_value = []
+        with patch.dict(os.environ, {"GSME_REVIEW_AUTH_TOKEN": TOKEN}):
+            with TestClient(create_admin_app(self.settings, store), base_url="http://127.0.0.1:8010",
+                            client=("127.0.0.1", 12345)) as client:
+                root = client.get("/")
+                self.assertIn("What would you like to know?", root.text)
+                self.assertNotIn("Include in selected-chunk review", root.text)
+                self.assertNotIn('id="batchNote"', root.text)
+                self.assertIn('id="batchNote"', client.get("/admin").text)
+                self.assertEqual(client.get("/api/library?tenant=workspace").status_code, 401)
+                self.assertEqual(client.get("/api/library?tenant=workspace&provider=fake",
+                    headers={"X-GSME-Token": TOKEN}).json(), [])
+                store.library.assert_called_once_with("workspace", "test-hash-v1-32", "gsme_evidence_v1_synthetic")
+
     def setUp(self):
         self.settings = Settings("postgresql://unused", "http://127.0.0.1:6333", Path("data"), dimension=32)
+
+    def test_markdown_legacy_newlines_and_actual_tampering(self):
+        from hashlib import sha256
+
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "normalized.md"
+            canonical = "# Source\n\nLOT A17; μ = 1\n".encode("utf-8")
+            legacy = canonical.replace(b"\n", b"\r\n")
+            path.write_bytes(legacy)
+            store = Mock()
+            store.inspect_version.return_value = {"version": {
+                "artifact_path": str(path), "normalized_sha256": sha256(canonical).hexdigest()}}
+            with patch.dict(os.environ, {"GSME_REVIEW_AUTH_TOKEN": TOKEN}):
+                with TestClient(create_admin_app(self.settings, store), base_url="http://127.0.0.1:8010",
+                                client=("127.0.0.1", 12345)) as client:
+                    url = f"/api/markdown/{uuid4()}?tenant=t"
+                    response = client.get(url, headers={"X-GSME-Token": TOKEN})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.content, canonical)
+                    self.assertEqual(path.read_bytes(), legacy)  # Preserve raw legacy evidence.
+                    path.write_bytes(legacy.replace(b"A17", b"Al7"))
+                    self.assertEqual(client.get(url, headers={"X-GSME-Token": TOKEN}).status_code, 409)
+
+    def test_batch_review_authorization_validation_and_explicit_selection(self):
+        store = Mock()
+        store.record_reviews.return_value = 2
+        with patch.dict(os.environ, {"GSME_REVIEW_AUTH_TOKEN": TOKEN, "GSME_AUTHORIZED_REVIEWERS": "alice"}):
+            with TestClient(create_admin_app(self.settings, store), base_url="http://127.0.0.1:8010",
+                            client=("127.0.0.1", 12345)) as client:
+                body = dict(tenant="t", version_id=str(uuid4()), chunk_ids=["a", "b"], decision="approved",
+                            reviewer="alice", rationale="Checked both original table records", source_verified=True)
+                self.assertEqual(client.post("/api/review/batch", json=body).status_code, 401)
+                headers = {"X-GSME-Token": TOKEN}
+                self.assertEqual(client.post("/api/review/batch", headers=headers,
+                                             json={**body, "reviewer": "mallory"}).status_code, 403)
+                self.assertEqual(client.post("/api/review/batch", headers=headers,
+                                             json={**body, "chunk_ids": []}).status_code, 422)
+                response = client.post("/api/review/batch", headers=headers, json=body)
+                self.assertEqual(response.json(), {"recorded": 2})
+                store.record_reviews.assert_called_once_with("t", body["version_id"], ["a", "b"],
+                    "approved", "alice", body["rationale"], True)
 
     def test_requires_strong_local_token_and_public_app_has_no_storage_routes(self):
         with patch.dict(os.environ, {"GSME_REVIEW_AUTH_TOKEN": "short"}):

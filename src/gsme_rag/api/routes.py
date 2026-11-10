@@ -31,7 +31,7 @@ from gsme_rag.parsing.schedules import (
 
 router = APIRouter(prefix="/v1")
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
-ALLOWED_SUFFIXES = {".docx", ".pdf", ".csv", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+ALLOWED_SUFFIXES = {".docx", ".pptx", ".xlsx", ".pdf", ".csv", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 
 
 async def _save_upload(upload: UploadFile) -> tuple[Path, str, str]:
@@ -40,7 +40,7 @@ async def _save_upload(upload: UploadFile) -> tuple[Path, str, str]:
     if suffix not in ALLOWED_SUFFIXES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Supported files are DOCX, PDF, CSV, PNG, JPEG, TIFF, and BMP",
+            detail="Supported files are DOCX, PPTX, XLSX, PDF, CSV, PNG, JPEG, TIFF, and BMP",
         )
 
     total = 0

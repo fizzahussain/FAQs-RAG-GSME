@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from gsme_rag.models import MarkdownChunk
+from gsme_rag.storage.acceptance import CLEAN_TEXT_POLICY, clean_text_eligible
 
 
 @dataclass(slots=True)
@@ -15,12 +16,17 @@ class ReviewDecision:
     reviewer: str
     rationale: str
     source_verified: bool = False
+    approval_basis: str = "human_source_review"
 
     def __post_init__(self) -> None:
         if self.decision not in {"approved", "rejected"}:
             raise ValueError("Review decision must be approved or rejected")
         if not self.reviewer.strip() or not self.rationale.strip():
             raise ValueError("Review decisions need a reviewer and rationale")
+        if self.approval_basis not in {"human_source_review", CLEAN_TEXT_POLICY}:
+            raise ValueError("Unknown evidence acceptance policy")
+        if self.approval_basis == CLEAN_TEXT_POLICY and self.source_verified:
+            raise ValueError("Automatic acceptance is not human source verification")
 
 
 @dataclass(slots=True)
@@ -55,7 +61,10 @@ class ReviewLedger:
         latest = relevant[-1]
         if latest.decision == "rejected":
             return "rejected"
-        return "approved" if latest.source_verified else "pending"
+        accepted = (latest.approval_basis == "human_source_review" and latest.source_verified
+                    or latest.approval_basis == CLEAN_TEXT_POLICY and clean_text_eligible(
+                        chunk.text, chunk.chunk_type, chunk.review_required, chunk.evidence_status))
+        return "approved" if accepted else "pending"
 
     @classmethod
     def load(cls, path: Path) -> "ReviewLedger":

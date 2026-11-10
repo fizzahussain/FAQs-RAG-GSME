@@ -6,6 +6,24 @@ from gsme_rag.review import ReviewDecision, ReviewLedger
 
 
 class IndexingBoundaryTests(unittest.TestCase):
+    def test_automatic_acceptance_is_not_a_human_check(self):
+        from gsme_rag.storage.acceptance import CLEAN_TEXT_POLICY
+        chunk = MarkdownChunk("auto", 0, "A clean FAQ answer.", "question_answer", "faq.docx", [],
+                              content_sha256="a" * 64)
+        decision = ReviewDecision("a" * 64, "auto", "approved", "ingestion-policy", "clean text policy",
+                                  False, CLEAN_TEXT_POLICY)
+        ledger = ReviewLedger([decision])
+        self.assertFalse(ledger.approved("a" * 64, "auto", require_source_verification=True))
+        candidate = prepare_candidate(chunk, ledger, tenant_id="local", model_version="local-v1",
+                                       encode_tokens=lambda text: list(text.encode()), max_tokens=100)
+        self.assertEqual(candidate.text, chunk.text)
+        chunk.review_required = True
+        with self.assertRaises(ValueError):
+            prepare_candidate(chunk, ledger, tenant_id="local", model_version="local-v1",
+                              encode_tokens=lambda text: [], max_tokens=100)
+        with self.assertRaisesRegex(ValueError, "not human"):
+            ReviewDecision("a" * 64, "auto", "approved", "policy", "policy", True, CLEAN_TEXT_POLICY)
+
     def setUp(self):
         self.chunk = MarkdownChunk("chunk-1", 0, "# Heading\n\nChecked prose", "section",
                                    "manual.pdf", ["Heading"], source_page_start=12,

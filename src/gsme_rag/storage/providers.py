@@ -3,6 +3,9 @@
 from hashlib import sha256
 import math
 import os
+import time
+import httpx
+from gsme_rag.observability import emit
 from typing import Protocol
 
 
@@ -17,6 +20,22 @@ class EmbeddingProvider(Protocol):
 
 class ProviderOperationError(RuntimeError):
     """Safe provider status that may be shown in a local job error."""
+
+    def __init__(self, message, *, retry_after_seconds=0):
+        super().__init__(message)
+        self.retry_after_seconds = min(3600, max(0, retry_after_seconds))
+
+
+def provider_retry_delay(error):
+    """Respect rate-limit cooldowns without logging raw response headers/bodies."""
+    if getattr(error, "status_code", None) != 429:
+        return 0
+    headers = getattr(error, "headers", None) or {}
+    try:
+        value = float(headers.get("retry-after", headers.get("Retry-After", "60")))
+        return min(3600, max(1, value)) if math.isfinite(value) else 60
+    except (ValueError, TypeError):
+        return 60
 
 
 def embedding_model_version(provider: str, dimension: int) -> str:
@@ -37,12 +56,12 @@ class FakeEmbeddings:
         self.dimension = dimension
         self.model_version = embedding_model_version("fake", dimension)
         self.calls = 0
-        import tiktoken
-
-        self._encoder = tiktoken.get_encoding("cl100k_base")
 
     def encode_tokens(self, text: str) -> list[int]:
-        return self._encoder.encode(text, disallowed_special=())
+        # Demo budgets use a conservative offline byte counter, not a model
+        # tokenizer whose first use downloads data. This is not a Cohere token
+        # estimate; real embeddings retain their actual provider tokenizer.
+        return list(text.encode("utf-8"))
 
     def _vector(self, text: str) -> list[float]:
         values = []
@@ -79,11 +98,18 @@ class CohereEmbeddings:
 
     def encode_tokens(self, text: str) -> list[int]:
         # The provider tokenizer runs only after the PostgreSQL approval check.
-        try:
-            result = self.client.tokenize(text=text, model="embed-v5.0-pro", offline=False)
-            return list(result.tokens)
-        except Exception as error:
-            raise ProviderOperationError(self._safe_error("token count", error)) from None
+        for attempt in range(2):
+            try:
+                result = self.client.tokenize(text=text, model="embed-v5.0-pro", offline=False,
+                                              request_options={"timeout_in_seconds": 30, "max_retries": 0})
+                return list(result.tokens)
+            except Exception as error:
+                if isinstance(error, httpx.TransportError) and attempt == 0:
+                    emit("tokenizer.transport.retry", error_type=type(error).__name__, model="embed-v5.0-pro")
+                    time.sleep(1)
+                    continue
+                raise ProviderOperationError(self._safe_error("token count", error),
+                                             retry_after_seconds=provider_retry_delay(error)) from None
 
     @staticmethod
     def _safe_error(operation: str, error: Exception) -> str:
@@ -98,7 +124,8 @@ class CohereEmbeddings:
             advice = "check request format, dimension, and token limit"
         else:
             advice = "check network and Embed 5 tokenizer/model support"
-        return f"Cohere {operation} failed ({'HTTP ' + str(status) if isinstance(status, int) else 'no HTTP status'}); {advice}"
+        label = 'HTTP ' + str(status) if isinstance(status, int) else 'no HTTP status; ' + type(error).__name__
+        return f"Cohere {operation} failed ({label}); {advice}"
 
     def _embed(self, texts: list[str], model: str, input_type: str) -> list[list[float]]:
         if len(texts) > 96:
@@ -111,9 +138,11 @@ class CohereEmbeddings:
                 embedding_types=["float"],
                 output_dimension=self.dimension,
                 truncate="NONE",
+                request_options={"timeout_in_seconds": 60, "max_retries": 0},
             )
         except Exception as error:
-            raise ProviderOperationError(self._safe_error("embedding", error)) from None
+            raise ProviderOperationError(self._safe_error("embedding", error),
+                                         retry_after_seconds=provider_retry_delay(error)) from None
         vectors = response.embeddings.float
         if len(vectors) != len(texts) or any(len(vector) != self.dimension for vector in vectors):
             raise ValueError("Embedding count/dimension mismatch")

@@ -10,7 +10,7 @@ def create_app() -> FastAPI:
         title="GSME Parsing and Chunking Preview",
         version=__version__,
         description=(
-            "Stage 1 normalizes DOCX, PDF, CSV, or image input to Markdown. "
+            "Stage 1 normalizes DOCX, PPTX, XLSX, PDF, CSV, or image input to Markdown. "
             "Stage 2 routes semantic Markdown units automatically. Schedule CSVs "
             "produce typed records for exact filtering; their semantic rows are optional."
         ),
@@ -52,8 +52,8 @@ DEMO_PAGE = """
   <section>
     <h2>1. Parse file to Markdown</h2>
     <p id="ocr-status" class="note">Checking whether OCR is installed on this server...</p>
-    <label for="file">DOCX, PDF, CSV, or image (PNG, JPEG, TIFF, BMP)</label>
-    <input id="file" type="file" accept=".docx,.pdf,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp">
+    <label for="file">DOCX, PPTX, XLSX, PDF, CSV, or image (PNG, JPEG, TIFF, BMP)</label>
+    <input id="file" type="file" accept=".docx,.pptx,.xlsx,.pdf,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp">
     <label for="schedule-kind">Schedule type (CSV only)</label>
     <select id="schedule-kind">
       <option value="auto">Use filename</option>

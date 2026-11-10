@@ -1,5 +1,7 @@
 # Project audit and release 0.15.5
 
+Historical source-audit record. See [0.17.0 answer evaluation](CHANGES_0.17.0.md), [0.18.0 exact schedule validation](CHANGES_0.18.0.md), and [0.18.1 provider/resource audit](CHANGES_0.18.1.md) for current behavior and verification. The formula/chart source-review gaps below remain unresolved.
+
 Audited on 29 October 2026, on the `embeddings-and-storage` branch. The scope covers parsing, Markdown normalization, chunking, source review, embedding preparation, PostgreSQL/Qdrant storage, the local console, package resources and the evidence-search boundary. The release is ready for developing retrieval against approved evidence. It does not certify every extracted formula, table cell or visual relationship.
 
 ## Findings fixed

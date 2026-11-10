@@ -16,6 +16,55 @@ from gsme_rag.review import ReviewDecision, ReviewLedger
 
 
 class StorageBoundaryTests(TestCase):
+    def test_provider_rate_limit_preserves_cooldown_without_private_details(self):
+        from gsme_rag.storage.providers import provider_retry_delay, ProviderOperationError
+
+        rate_limit = SimpleNamespace(status_code=429, headers={"retry-after": "75"})
+        self.assertEqual(provider_retry_delay(rate_limit), 75)
+        self.assertEqual(provider_retry_delay(SimpleNamespace(status_code=429)), 60)
+        self.assertEqual(provider_retry_delay(SimpleNamespace(status_code=500)), 0)
+        error = ProviderOperationError("Safe rate limit notice", retry_after_seconds=75)
+        self.assertEqual(error.retry_after_seconds, 75)
+
+    def test_tokenizer_retries_transport_once_but_not_rate_limit(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import httpx
+
+        provider = CohereEmbeddings.__new__(CohereEmbeddings)
+        provider.client = Mock()
+        provider.client.tokenize.side_effect = [httpx.ConnectError("private request details"), SimpleNamespace(tokens=[1, 2])]
+        with patch("gsme_rag.storage.providers.time.sleep") as sleep:
+            self.assertEqual(provider.encode_tokens("synthetic test"), [1, 2])
+        self.assertEqual(provider.client.tokenize.call_count, 2)
+        sleep.assert_called_once_with(1)
+        class RateLimit(Exception):
+            status_code = 429
+            headers = {"retry-after": "75"}
+        provider.client.tokenize.reset_mock()
+        provider.client.tokenize.side_effect = RateLimit("private response")
+        with self.assertRaises(ProviderOperationError) as caught:
+            provider.encode_tokens("synthetic test")
+        self.assertEqual(provider.client.tokenize.call_count, 1)
+        self.assertEqual(caught.exception.retry_after_seconds, 75)
+        self.assertNotIn("private", str(caught.exception))
+
+    def test_missing_link_warning_does_not_spread_to_other_rows_on_page(self):
+        from gsme_rag.storage.postgres import _page_warning_codes
+
+        parsed = SimpleNamespace(warnings=[ParseWarning("link_target_missing", "missing", "page 4")])
+        good = MarkdownChunk("good", 0, "Muse coordinates shared tapeouts.", "faq", "faq.pdf", [],
+                             source_page_start=4, source_page_end=4)
+        missing = MarkdownChunk("missing", 1, "The schedule can be found here.", "faq", "faq.pdf", [],
+                                source_page_start=4, source_page_end=4)
+        self.assertEqual(_page_warning_codes(parsed, good), [])
+        self.assertEqual(_page_warning_codes(parsed, missing), ["link_target_missing"])
+        from gsme_rag.storage.postgres import _review_warning_codes
+        stored = ["table_inferred", "link_target_missing"]
+        self.assertEqual(_review_warning_codes(good.text, stored), ["table_inferred"])
+        self.assertEqual(_review_warning_codes(missing.text, stored), ["link_target_missing", "table_inferred"])
+        self.assertEqual(stored, ["table_inferred", "link_target_missing"])
+
     def test_page_warning_codes_keep_raw_manifest_separate(self):
         from gsme_rag.storage.postgres import _page_warning_codes
 
@@ -96,7 +145,7 @@ class StorageBoundaryTests(TestCase):
         self.assertEqual(len(provider.embed_query("query")), 1024)
         self.assertEqual(provider.client.requests[0],
                          ("tokenize", {"text": "approved test", "model": "embed-v5.0-pro",
-                                       "offline": False}))
+                                       "offline": False, "request_options": {"timeout_in_seconds": 30, "max_retries": 0}}))
         document = provider.client.requests[1][1]
         query = provider.client.requests[2][1]
         self.assertEqual((document["model"], document["input_type"]),
@@ -115,7 +164,7 @@ class StorageBoundaryTests(TestCase):
             provider.encode_tokens("approved test")
         self.assertNotIn("secret value", str(raised.exception))
 
-    def test_source_approved_budget_is_enforced_with_real_test_tokenizer(self):
+    def test_source_approved_budget_is_enforced_with_offline_test_counter(self):
         chunk = MarkdownChunk(
             "chunk-1",
             0,

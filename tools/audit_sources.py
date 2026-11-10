@@ -37,7 +37,7 @@ def audit(source: Path, output: Path, pages: list[int] | None = None,
             selected.save(parse_input)
     parsed = parse_to_markdown(parse_input)
     result = chunk_markdown(parsed.markdown, parsed.filename, metadata=parsed.metadata)
-    (output / "normalized.md").write_text(parsed.markdown, encoding="utf-8")
+    (output / "normalized.md").write_bytes(parsed.markdown.encode("utf-8"))
     record = {"source": str(source), "strategy_used": parsed.strategy_used, "environment": source_profile(parse_input),
               "metadata": asdict(parsed.metadata), "warnings": [asdict(w) for w in parsed.warnings],
               "chunk_warnings": [asdict(w) for w in result.warnings],
@@ -46,6 +46,10 @@ def audit(source: Path, output: Path, pages: list[int] | None = None,
     if parse_pages:
         record["parent_source_sha256"] = checksum(source)
         record["page_map"] = {str(index): number for index, number in enumerate(parse_pages, start=1)}
+        for chunk in record["chunks"]:
+            if chunk.get("source_page_start"):
+                chunk["parent_source_page_start"] = parse_pages[chunk["source_page_start"] - 1]
+                chunk["parent_source_page_end"] = parse_pages[chunk.get("source_page_end", chunk["source_page_start"]) - 1]
     (output / "evidence.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     if source.suffix.lower() == ".pdf" and pages:
         with fitz.open(source) as pdf:

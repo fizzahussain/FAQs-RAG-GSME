@@ -86,6 +86,7 @@ def main():
     retrieval.add_argument("--tenant", required=True)
     retrieval.add_argument("--provider", choices=("fake", "cohere"), default="cohere")
     retrieval.add_argument("--strategy", choices=("dense", "hybrid"), default="hybrid")
+    retrieval.add_argument("--query-mode", choices=("original", "expanded", "multi"), default="original")
     retrieval.add_argument("--top-k", type=int, default=5)
     retrieval.add_argument("--candidates", type=int, default=30)
     retrieval.add_argument("--document-id")
@@ -102,11 +103,23 @@ def main():
     retrieval_eval.add_argument("--confirm-external", action="store_true")
     schedule = commands.add_parser("schedules")
     schedule.add_argument("--tenant", required=True)
-    schedule.add_argument("--kind", choices=("full", "shared"), required=True)
+    schedule.add_argument("--kind", choices=("full", "shared", "both"))
+    schedule.add_argument("--question", default="")
     schedule.add_argument("--technology-nm", type=int)
     schedule.add_argument("--flavor")
     schedule.add_argument("--tapeout-on-or-after", type=date.fromisoformat)
     schedule.add_argument("--document-id")
+    schedule.add_argument("--date-field", choices=("trial_deadline", "final_deadline", "tapeout_date", "estimated_ship_date"))
+    schedule.add_argument("--date-from", type=date.fromisoformat)
+    schedule.add_argument("--date-to", type=date.fromisoformat)
+    schedule.add_argument("--as-of", type=date.fromisoformat)
+    schedule.add_argument("--timezone", default="Asia/Karachi")
+    schedule.add_argument("--deadline-status", choices=("all", "open", "closed"))
+    schedule.add_argument("--next-dates", type=int)
+    schedule.add_argument("--limit", type=int, default=100)
+    schedule.add_argument("--offset", type=int, default=0)
+    schedule.add_argument("--snapshot")
+    schedule.add_argument("--catalog", action="store_true")
     cleanup = commands.add_parser("reconcile")
     cleanup.add_argument("--provider", choices=("fake", "cohere"), default="cohere")
     repair = commands.add_parser("repair-index")
@@ -138,13 +151,16 @@ def main():
         vectors = QdrantEvidence(settings.qdrant_url,
             settings.collection + ("_synthetic" if args.provider == "fake" else ""),
             settings.dimension, hybrid=args.strategy == "hybrid")
-        if args.command == "evaluate-retrieval":
-            _json(evaluate_retrieval(store, vectors, provider, reranker, settings, args.cases,
-                                     args.strategy, args.min_rerank_score))
-        else:
-            options = RetrievalOptions(args.top_k, args.candidates, args.strategy, args.document_id,
-                                       args.category, args.source_file, args.context_chars, args.min_rerank_score)
-            _json(retrieve(store, vectors, provider, reranker, settings, args.tenant, args.question, options))
+        try:
+            if args.command == "evaluate-retrieval":
+                _json(evaluate_retrieval(store, vectors, provider, reranker, settings, args.cases,
+                                         args.strategy, args.min_rerank_score))
+            else:
+                options = RetrievalOptions(args.top_k, args.candidates, args.strategy, args.document_id,
+                                           args.category, args.source_file, args.context_chars, args.min_rerank_score, args.query_mode)
+                _json(retrieve(store, vectors, provider, reranker, settings, args.tenant, args.question, options))
+        finally:
+            vectors.client.close()
         return
     if args.command == "migrate":
         _json({"applied": store.migrate()})
@@ -219,16 +235,19 @@ def main():
             else None
         )
     if args.command == "schedules":
-        _json(
-            store.schedules(
-                args.tenant,
-                args.kind,
-                technology_nm=args.technology_nm,
-                flavor=args.flavor,
-                tapeout_on_or_after=args.tapeout_on_or_after,
-                document_id=args.document_id,
-            )
-        )
+        from gsme_rag.retrieval.schedules import ScheduleQuery, search_schedules
+        if args.catalog:
+            _json(store.schedule_catalog(args.tenant, args.document_id))
+            return
+        fields = {key: getattr(args, key) for key in ScheduleQuery.model_fields
+                  if hasattr(args, key) and getattr(args, key) is not None}
+        if args.kind:
+            fields["schedule_kind"] = args.kind
+        if args.tapeout_on_or_after:
+            if args.date_from or args.date_field not in (None, "tapeout_date"):
+                raise ValueError("Use date_from/date_field instead of conflicting legacy tapeout filters")
+            fields["date_from"] = args.tapeout_on_or_after
+        _json(search_schedules(store, args.tenant, ScheduleQuery(**fields), args.document_id))
         return
     if args.command in ("worker", "worker-once", "search", "evaluate"):
         vector = QdrantEvidence(

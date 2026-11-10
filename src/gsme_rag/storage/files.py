@@ -14,6 +14,21 @@ def checksum(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verified_markdown(path: Path, expected_sha256: str) -> bytes:
+    """Allow only the legacy Windows newline bug, never a changed artifact.
+
+    Keep the original bytes on disk for inspection. Even newline recovery must
+    reproduce the recorded hash; technical content is never silently repaired.
+    """
+    content = path.read_bytes()
+    if sha256(content).hexdigest() == expected_sha256:
+        return content
+    legacy = content.replace(b"\r\n", b"\n")
+    if sha256(legacy).hexdigest() == expected_sha256:
+        return legacy
+    raise ValueError("Normalized Markdown changed after ingestion; submit a new version")
+
+
 def save_original(path: Path, root: Path, tenant_id: str, version_id: str) -> tuple[Path, str]:
     if not path.is_file() or path.is_symlink():
         raise ValueError("Source must be a regular local file")

@@ -15,6 +15,7 @@ from gsme_rag.parsing.ocr import OcrUnavailable, ocr_image
 from gsme_rag.models import ParseWarning, ParsedDocument
 from gsme_rag.text import normalize_inline, normalize_multiline
 from gsme_rag.parsing.fidelity import _reason as fidelity_reason
+from gsme_rag.parsing.links import markdown_link
 
 
 def _iter_blocks(document: DocumentObject) -> Iterator[Paragraph | Table]:
@@ -26,11 +27,11 @@ def _iter_blocks(document: DocumentObject) -> Iterator[Paragraph | Table]:
 
 
 def _format_runs(paragraph: Paragraph, include_emphasis: bool = True) -> str:
-    groups: list[tuple[str, bool, bool, str]] = []
+    groups: list[tuple[str, bool, bool, str, str | None]] = []
     # Hyperlinks contain their own runs and are absent from paragraph.runs.
-    runs = [run for item in paragraph.iter_inner_content()
+    runs = [(run, item.url if isinstance(item, Hyperlink) else None) for item in paragraph.iter_inner_content()
             for run in (item.runs if isinstance(item, Hyperlink) else [item])]
-    for run in runs:
+    for run, target in runs:
         text = run.text.replace("\r", "").replace("\n", " ")
         if not text:
             continue
@@ -39,18 +40,19 @@ def _format_runs(paragraph: Paragraph, include_emphasis: bool = True) -> str:
         italic = next((value for value in (run.italic, run.style.font.italic, paragraph.style.font.italic)
                        if value is not None), False)
         position = "sup" if run.font.superscript else "sub" if run.font.subscript else ""
-        if groups and groups[-1][1:] == (bold, italic, position):
+        if groups and groups[-1][1:] == (bold, italic, position, target):
             previous = groups[-1][0]
-            groups[-1] = (previous + text, bold, italic, position)
+            groups[-1] = (previous + text, bold, italic, position, target)
         else:
-            groups.append((text, bold, italic, position))
+            groups.append((text, bold, italic, position, target))
 
     fragments = []
-    for text, bold, italic, position in groups:
+    for text, bold, italic, position, target in groups:
         if position:
             text = f"<{position}>{text}</{position}>"
         marker = ("***" if bold and italic else "**" if bold else "*" if italic else "") if include_emphasis else ""
-        fragments.append(f"{marker}{text}{marker}" if marker else text)
+        text = f"{marker}{text}{marker}" if marker else text
+        fragments.append(markdown_link(text, target) if target else text)
     rendered = "".join(fragments)
     return re.sub(r"[ \t]+", " ", rendered).strip()
 
@@ -197,13 +199,17 @@ def parse_docx_to_markdown(
         table_number += 1
         table_needs_review = False
         rows = []
+        row_reviews = []
         for row_number, row in enumerate(block.rows, start=1):
             cells = []
+            row_review = False
             for column_number, cell in enumerate(row.cells, start=1):
                 value, needs_review = _cell_text(cell, warnings, f"table {table_number} row {row_number} column {column_number}", image_cache)
                 cells.append(value)
                 table_needs_review |= needs_review
+                row_review |= needs_review
             rows.append(cells)
+            row_reviews.append(row_review)
         if not rows:
             warnings.append(
                 ParseWarning(
@@ -212,6 +218,29 @@ def parse_docx_to_markdown(
                     location=f"table {table_number}",
                 )
             )
+            continue
+        # An explicit two-column Q/A header fixes the field mapping. A merged
+        # category band elsewhere must not make independent physical Q/A cells
+        # uncertain. Vertical/partial merges, OCR and nested cells stay reviewed.
+        if len(rows[0]) == 2 and [value.strip().casefold() for value in rows[0]] == ["question", "answer"]:
+            for index, (row, values) in enumerate(zip(block.rows[1:], rows[1:]), 2):
+                nodes = row._tr.tc_lst
+                full_band = (len(nodes) == 1 and nodes[0].grid_span == 2 and nodes[0].vMerge is None
+                    and values[0].strip() and len(values[0].split()) <= 12
+                    and not re.search(r"[?!.;=<>]", values[0])
+                    and index < len(rows) and rows[index][0].strip().endswith("?")
+                    and not row_reviews[index - 1])
+                if full_band:
+                    parts.append("### " + values[0].replace("\n", " "))
+                    continue
+                physical_pair = (len(nodes) == 2 and all(node.grid_span == 1 and node.vMerge is None for node in nodes)
+                    and row.grid_cols_before == 0 and row.grid_cols_after == 0)
+                uncertain = row_reviews[0] or row_reviews[index - 1] or not physical_pair
+                rendered = f"<!-- table: {table_number}; first_data_row: {index} -->\n" + render_markdown_table([rows[0], values])
+                if uncertain:
+                    warnings.append(ParseWarning("docx_row_review", "This row's cell structure or content requires source review", f"table {table_number} row {index}"))
+                    rendered = "<!-- review-required: docx-table -->\n\n" + rendered + "\n\n<!-- review-end -->"
+                parts.append(rendered)
             continue
         if any(cell.tables for row in block.rows for cell in row.cells):
             warnings.append(

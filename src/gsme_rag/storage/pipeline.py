@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 from threading import Event, Thread
 import time
@@ -12,13 +13,14 @@ from gsme_rag.chunking import chunk_markdown
 from gsme_rag.indexing import prepare_candidate, CandidateValidationError
 from gsme_rag.models import MarkdownChunk
 from gsme_rag.parsing import parse_to_markdown
-from gsme_rag.parsing.schedules import parse_schedule_records
+from gsme_rag.parsing.schedules import parse_schedule_records, parse_schedule_workbook
 from gsme_rag.parsing.profile import source_profile
 from gsme_rag.review import ReviewDecision, ReviewLedger
 from gsme_rag.storage.config import Settings
 from gsme_rag.storage.postgres import EvidenceStore
 from gsme_rag.storage.providers import ProviderOperationError
 from gsme_rag.version import PARSER_VERSION, CHUNKER_VERSION
+from gsme_rag.observability import emit, operation
 
 
 def _index_error_label(error: Exception, stage: str) -> str:
@@ -94,6 +96,8 @@ def process_ingestion(
         try:
             return _run_ingestion(store, settings, job, started, lease, stage)
         except Exception as error:
+            emit("ingestion.failed", stage=stage["name"], job_id=str(job["id"]),
+                 version_id=str(job["version_id"]), error_type=type(error).__name__)
             label = f"{type(error).__name__}: ingestion {stage['name']} failed"
             with store.connect() as db:
                 # Only the worker holding this attempt can fail the version
@@ -124,8 +128,10 @@ def _run_ingestion(store, settings, job, started, lease, stage):
     if source_profile(original, job["parse_options"].get("pdf_backend")) != job["parse_options"]:
         raise ValueError("Parser dependencies changed after submission; resubmit the source")
     stage["name"] = "parse"
-    parsed = parse_to_markdown(original, job["source_file"], job["schedule_kind"],
-                               pdf_backend=job["parse_options"].get("pdf_backend"))
+    with operation("ingestion.parse", job_id=str(job["id"]), version_id=str(job["version_id"])):
+        parsed = parse_to_markdown(original, job["source_file"], job["schedule_kind"],
+                                   pdf_backend=job["parse_options"].get("pdf_backend"))
+    emit("ingestion.backend", backend=parsed.strategy_used, warnings=len(parsed.warnings), version_id=str(job["version_id"]))
     if parsed.metadata.classification_status != "ready":
         raise ValueError("Schedule kind is ambiguous. Submit with Full or Shared")
     # Schedule dates stay as typed rows for exact filtering
@@ -133,7 +139,8 @@ def _run_ingestion(store, settings, job, started, lease, stage):
         stage["name"] = "schedule_rows"
         if parsed.metadata.document_class != "schedule":
             raise ValueError("CSV did not match the typed schedule schema")
-        rows = parse_schedule_records(original)
+        rows = (parse_schedule_workbook(original, job["schedule_kind"])
+                if original.suffix.lower() == ".xlsx" else parse_schedule_records(original))
         if not rows:
             raise ValueError("Schedule has no typed rows")
         chunks = []
@@ -141,9 +148,13 @@ def _run_ingestion(store, settings, job, started, lease, stage):
         stage["name"] = "chunk"
         if parsed.metadata.document_class != "document":
             raise ValueError("Unexpected structured data")
-        chunks = chunk_markdown(
-            parsed.markdown, parsed.filename, metadata=parsed.metadata
-        ).chunks
+        with operation("ingestion.chunk", version_id=str(job["version_id"])):
+            chunk_options = {"strategy": job["parse_options"].get("chunk_strategy", "auto")}
+            if chunk_options["strategy"] == "semantic":
+                from gsme_rag.chunking.semantic import LocalSemanticEmbeddings
+                boundary = LocalSemanticEmbeddings(job["parse_options"]["semantic_boundary_model_digest"])
+                chunk_options.update(semantic_embedder=boundary, semantic_model=boundary.model + "@" + boundary.digest)
+            chunks = chunk_markdown(parsed.markdown, parsed.filename, metadata=parsed.metadata, **chunk_options).chunks
         rows = []
         if not chunks:
             raise ValueError("Parser produced no reviewable chunks")
@@ -153,7 +164,8 @@ def _run_ingestion(store, settings, job, started, lease, stage):
     artifact.mkdir(parents=True, exist_ok=True)
     target = artifact / "normalized.md"
     temporary = artifact / ".normalized.tmp"
-    temporary.write_text(parsed.markdown, encoding="utf-8")
+    # Match the parser hash exactly: Windows text writes otherwise insert CRLF.
+    temporary.write_bytes(parsed.markdown.encode("utf-8"))
     temporary.replace(target)
     # Keep parser warnings beside the normalized source for human review
     manifest = artifact / "review_manifest.json"
@@ -164,6 +176,8 @@ def _run_ingestion(store, settings, job, started, lease, stage):
                 "source_sha256": parsed.metadata.content_sha256,
                 "normalized_sha256": parsed.metadata.normalized_sha256,
                 "parser_backend": parsed.strategy_used,
+                "parser_version": parsed.metadata.parser_version,
+                "parse_options": job["parse_options"],
                 "warnings": [asdict(w) for w in parsed.warnings],
                 "evidence_diagnostics": [asdict(item) for item in parsed.evidence_diagnostics],
                 "chunk_count": len(chunks),
@@ -179,6 +193,8 @@ def _run_ingestion(store, settings, job, started, lease, stage):
     store.complete_ingestion(
         job, parsed, chunks, rows, str(target), time.perf_counter() - started
     )
+    emit("ingestion.stored", version_id=str(job["version_id"]), chunks=len(chunks),
+         elapsed_ms=round((time.perf_counter() - started) * 1000, 2))
     return {
         "job_id": str(job["id"]),
         "version_id": str(job["version_id"]),
@@ -211,7 +227,10 @@ def process_index(
     with _LeaseHeartbeat(
         lambda: store.heartbeat_index(jobs), settings.lease_seconds
     ) as lease:
-        return _run_index(store, vectors, provider, settings, jobs, prepared, started, lease, stage)
+        with operation("index.batch", version_id=version_id, model=provider.model_version, chunks=len(jobs)):
+            result = _run_index(store, vectors, provider, settings, jobs, prepared, started, lease, stage)
+        emit("index.counts", version_id=version_id, indexed=result["indexed"], failed=result["failed"], stage=stage["name"])
+        return result
 
 
 def _run_index(store, vectors, provider, settings, jobs, prepared, started, lease, stage):
@@ -251,8 +270,8 @@ def _run_index(store, vectors, provider, settings, jobs, prepared, started, leas
                     review_required=job["review_required"],
                     evidence_status="approved",
                 )
-                # The database view already checked the latest source review
-                # This ledger only adapts that decision to prepare_candidate
+                # Preserve whether this is a human check or automatic policy
+                # acceptance; never label a machine decision source-verified.
                 ledger = ReviewLedger(
                     [
                         ReviewDecision(
@@ -260,8 +279,9 @@ def _run_index(store, vectors, provider, settings, jobs, prepared, started, leas
                             chunk.chunk_id,
                             "approved",
                             "postgres-review",
-                            "source-verified",
-                            True,
+                            "database acceptance decision",
+                            job["source_verified"],
+                            job["approval_basis"],
                         )
                     ]
                 )
@@ -276,19 +296,30 @@ def _run_index(store, vectors, provider, settings, jobs, prepared, started, leas
                     continue
                 prepared.append((job, candidate))
             stage["name"] = "document_embedding"
+            cached, fresh = {}, []
+            for job, candidate in prepared:
+                value = vectors.reusable_vector(job["tenant_id"], provider.model_version,
+                    sha256(candidate.text.encode()).hexdigest()) if callable(getattr(vectors, "reusable_vector", None)) else None
+                if (isinstance(value, list) and len(value) == settings.dimension
+                        and all(isinstance(v, (int, float)) and math.isfinite(v) for v in value) and any(value)):
+                    cached[str(job["id"])] = value
+                else:
+                    fresh.append((job, candidate))
             embeddings = []
-            if prepared:
+            if fresh:
                 embedding_calls = 1
                 try:
-                    embeddings = provider.embed_documents([candidate.text for _, candidate in prepared])
+                    embeddings = provider.embed_documents([candidate.text for _, candidate in fresh])
                 finally:
-                    store.record_embedding_batch(provider.model_version, len(prepared), time.perf_counter() - started)
-            if len(embeddings) != len(prepared):
+                    store.record_embedding_batch(provider.model_version, len(fresh), time.perf_counter() - started)
+            if len(embeddings) != len(fresh):
                 raise ValueError("Embedding provider returned wrong number of vectors")
+            by_job = {**cached, **{str(job["id"]): vector for (job, _), vector in zip(fresh, embeddings, strict=True)}}
             lease.check()
             stage["name"] = "vector_validation"
             payloads = []
-            for (job, candidate), vector in zip(prepared, embeddings, strict=True):
+            for job, candidate in prepared:
+                vector = by_job[str(job["id"])]
                 if len(vector) != settings.dimension:
                     raise ValueError("Embedding dimension mismatch")
                 payloads.append(
@@ -314,14 +345,17 @@ def _run_index(store, vectors, provider, settings, jobs, prepared, started, leas
             error = candidate_errors.get(job["id"])
             store.index_done(job["id"], job["attempt_count"], error=error, retryable=not bool(error))
         store.mark_indexed_versions(list({job["version_id"] for job in jobs}))
-        return {"indexed": len(jobs) - len(candidate_errors), "embedding_calls": embedding_calls,
+        return {"indexed": len(jobs) - len(candidate_errors), "embedding_calls": embedding_calls, "reused_embeddings": len(cached),
                 "failed": len(candidate_errors), "candidate_errors": list(candidate_errors.values())}
     except Exception as error:
         # Keep source text and secrets out of stored errors
+        emit("index.failed", stage=stage["name"], error_type=type(error).__name__, model=provider.model_version)
         label = _index_error_label(error, stage["name"])
+        retry_after = getattr(error, "retry_after_seconds", 0)
         for job in jobs:
-            store.index_done(job["id"], job["attempt_count"], error=label)
-        return {"indexed": 0, "embedding_calls": embedding_calls, "failed": len(jobs), "error": label}
+            store.index_done(job["id"], job["attempt_count"], error=label, retry_after_seconds=retry_after)
+        return {"indexed": 0, "embedding_calls": embedding_calls, "failed": len(jobs), "error": label,
+                "retry_after_seconds": retry_after}
 
 
 def reconcile(store: EvidenceStore, vectors, model_version: str, limit: int = 100) -> int:
@@ -438,6 +472,7 @@ def search_evidence(
                         "evidence_status": "approved", "model_version": provider.model_version,
                         "parser_backend": row["parser_backend"],
                         "parser_version": row["parser_version"], "chunker_version": row["chunker_version"],
+                        "approval_basis": row["approval_basis"], "source_verified": row["source_verified"],
                     }
                 )
             if len(results) >= limit:

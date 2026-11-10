@@ -52,6 +52,20 @@ class MemoryStore:
 
 
 class RetrievalTests(TestCase):
+    def test_rerank_receives_at_most_requested_candidates_not_whole_corpus(self):
+        self.rows.clear()
+        for index in range(40):
+            self.rows[f"p{index}"] = source_row(f"Synthetic deadline evidence number {index}.", chunk=f"chunk-{index}")
+        self.store.scope = list(self.rows)
+        self.vectors.query.return_value = [SimpleNamespace(id=point, score=1.0) for point in self.rows]
+        with patch.object(self.reranker, "rank", wraps=self.reranker.rank) as rank:
+            report = retrieve(self.store, self.vectors, self.provider, self.reranker, self.settings,
+                              "workspace", "What is the deadline?", RetrievalOptions(candidate_count=30, top_k=5))
+        self.assertEqual(len(rank.call_args.args[1]), 30)
+        self.assertEqual(report["rerank_input_count"], 30)
+        self.assertEqual(report["candidate_count"], 30)
+        self.assertEqual(len(report["results"]), 5)
+
     def setUp(self):
         self.settings = Settings("unused", "unused", Path("data"), dimension=32)
         self.provider = FakeEmbeddings(32)
@@ -252,6 +266,7 @@ class RetrievalApiTests(TestCase):
     def setUp(self):
         self.store = Mock()
         self.store.retrieval_scope.return_value = []
+        self.store.schedule_search.return_value = {"rows": [], "sources": [], "total": 0}
         settings = Settings("unused", "http://127.0.0.1:6333", Path("data"), dimension=32)
         with patch.dict(os.environ, {"GSME_REVIEW_AUTH_TOKEN": "local-test-token-at-least-20-characters"}):
             app = create_admin_app(settings, self.store)
@@ -278,21 +293,20 @@ class RetrievalApiTests(TestCase):
 
     def test_schedules_need_kind_and_do_not_call_models(self):
         self.assertEqual(self.query(route="schedules").json()["status"], "clarification_needed")
-        self.store.schedules.return_value = []
-        result = self.query(route="schedules", schedule_kind="shared", technology_nm=28)
+        result = self.query(route="schedules", schedule_kind="shared", technology_nm=28, question="")
         self.assertEqual(result.json()["reranking_status"], "not_applicable_exact_sql")
         self.store.retrieval_scope.assert_not_called()
 
     def test_schedule_row_limit_is_explicit_not_silent_truncation(self):
-        self.store.schedules.return_value = [{"source_row_number": n} for n in range(4)]
-        result = self.query(route="schedules", schedule_kind="shared", schedule_limit=3).json()
+        self.store.schedule_search.return_value = {"rows": [dict(source_row_number=n, version_id="v", source_sheet="") for n in range(2, 5)], "sources": [], "total": 4}
+        result = self.query(route="schedules", schedule_kind="shared", schedule_limit=3, question="").json()
         self.assertEqual(len(result["results"]), 3)
         self.assertTrue(result["has_more"])
-        self.assertEqual(self.store.schedules.call_args.kwargs["limit"], 4)
+        self.assertEqual(self.store.schedule_search.call_args.args[1].limit, 3)
 
     def test_mixed_route_keeps_schedule_status_separate_from_document_results(self):
-        self.store.schedules.return_value = [{"source_row_number": 2, "technology_nm": 28}]
-        result = self.query(route="mixed", schedule_kind="shared", technology_nm=28).json()
+        self.store.schedule_search.return_value = {"rows": [dict(source_row_number=2, technology_nm=28, version_id="v", source_sheet="")], "sources": [], "total": 1}
+        result = self.query(route="mixed", schedule_kind="shared", technology_nm=28, question="Show shared schedules").json()
         self.assertEqual(result["status"], "no_eligible_evidence")
         self.assertEqual(result["schedule_status"], "results")
         self.assertEqual(result["schedule_rows"][0]["technology_nm"], 28)

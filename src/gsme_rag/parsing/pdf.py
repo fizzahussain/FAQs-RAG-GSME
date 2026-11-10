@@ -111,6 +111,18 @@ def _lines_to_text(lines: list[_Line]) -> str:
     return normalize_multiline("\n".join(line.text for line in lines))
 
 
+def _substantive_drawings(page) -> list[dict]:
+    """Do not confuse page frames, tiny bullets or text underlines with diagrams."""
+    area = max(page.rect.get_area(), 1)
+    output = []
+    for drawing in page.get_drawings():
+        rect = fitz.Rect(drawing["rect"])
+        if (rect.width > 8 and rect.height > 8 and .0005 <= rect.get_area() / area < .65
+                and rect.y0 > page.rect.height * .10 and rect.y1 < page.rect.height * .88):
+            output.append(drawing)
+    return output
+
+
 def _table_markdown(lines: list[_Line], page_width: float) -> tuple[str, list[ParseWarning]]:
     split_x = page_width * 0.33
     warnings: list[ParseWarning] = []
@@ -431,7 +443,7 @@ def _native_markdown(document: fitz.Document, lines: list[_Line],
                 message="Page contains drawn content but no extracted text",
                 location=f"page {page_no}",
             ))
-        elif len(page.get_drawings()) >= 10 and not accepted_tables:
+        elif len(_substantive_drawings(page)) >= 10 and not accepted_tables:
             warnings.append(ParseWarning(
                 code="vector_content_needs_review",
                 message="Drawn graphics may contain relationships missing from extracted text",
@@ -890,7 +902,7 @@ def _supplement_image_ocr(document: fitz.Document, converted: ParsedDocument,
     return converted
 
 
-def parse_pdf_to_markdown(
+def _parse_pdf_to_markdown(
     path: str | Path,
     source_name: str | None = None,
     backend: str | None = None,
@@ -1026,3 +1038,11 @@ def parse_pdf_to_markdown(
         with fitz.open(input_path) as image_pdf:
             return _supplement_image_ocr(image_pdf, result, lines)
     return result
+
+
+def parse_pdf_to_markdown(path: str | Path, source_name: str | None = None,
+                          backend: str | None = None) -> ParsedDocument:
+    from gsme_rag.parsing.links import preserve_pdf_links
+    result = _parse_pdf_to_markdown(path, source_name, backend)
+    with fitz.open(path) as document:
+        return preserve_pdf_links(document, result)

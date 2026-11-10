@@ -4,6 +4,9 @@ from datetime import date
 from pathlib import Path
 import json
 import csv
+from zipfile import BadZipFile
+from lxml.etree import XMLSyntaxError
+from openpyxl.utils.exceptions import InvalidFileException
 import re
 from uuid import UUID, uuid4, uuid5
 
@@ -12,10 +15,12 @@ from psycopg.rows import dict_row
 
 from gsme_rag.chunking.chunker import CHUNKER_VERSION
 from gsme_rag.models import MarkdownChunk
-from gsme_rag.storage.files import checksum, save_original
-from gsme_rag.parsing.schedules import resolve_schedule_kind, is_schedule_header
+from gsme_rag.storage.files import checksum, save_original, verified_markdown
+from gsme_rag.storage.acceptance import CLEAN_TEXT_POLICY, clean_text_eligible
+from gsme_rag.parsing.schedules import resolve_schedule_kind, is_schedule_header, parse_schedule_workbook
 from gsme_rag.version import PARSER_VERSION
 from gsme_rag.parsing.profile import source_profile
+from gsme_rag.parsing.links import missing_link_reference
 
 
 POINT_NAMESPACE = UUID("09e8281a-b989-43ae-ac31-f6b6990f3a14")
@@ -23,15 +28,25 @@ POINT_NAMESPACE = UUID("09e8281a-b989-43ae-ac31-f6b6990f3a14")
 
 def _page_warning_codes(parsed, chunk: MarkdownChunk) -> list[str]:
     """Attach only page-located warnings; the manifest retains every raw warning."""
+    codes = {"link_target_missing"} if missing_link_reference(chunk.text) else set()
     if chunk.source_page_start is None:
-        return []
+        return sorted(codes)
     last = chunk.source_page_end or chunk.source_page_start
-    codes = {
+    codes |= {
         warning.code
         for warning in parsed.warnings
-        if (match := re.match(r"page (\d+)(?:\b|;)", warning.location or ""))
+        if warning.code != "link_target_missing"
+        and (match := re.match(r"page (\d+)(?:\b|;)", warning.location or ""))
         and chunk.source_page_start <= int(match.group(1)) <= last
     }
+    return sorted(codes)
+
+
+def _review_warning_codes(text: str, stored_codes: list[str]) -> list[str]:
+    """Correct old page-wide link labels for display, without rewriting history."""
+    codes = set(stored_codes) - {"link_target_missing"}
+    if missing_link_reference(text):
+        codes.add("link_target_missing")
     return sorted(codes)
 
 
@@ -85,6 +100,8 @@ class EvidenceStore:
     ) -> dict:
         if not tenant_id.strip() or source.suffix.lower() not in {
             ".docx",
+            ".pptx",
+            ".xlsx",
             ".pdf",
             ".csv",
             ".png",
@@ -105,12 +122,20 @@ class EvidenceStore:
                 header = next((row for row in csv.reader(incoming, strict=True)
                                if any(value.strip() for value in row)), [])
             is_schedule = is_schedule_header(header)
-        if is_schedule:
+        try:
+            workbook_rows = parse_schedule_workbook(source, schedule_kind) if source.suffix.lower() == ".xlsx" else None
+        except (BadZipFile, XMLSyntaxError, InvalidFileException, KeyError):
+            raise ValueError("The XLSX file is invalid or unreadable") from None
+        if workbook_rows is not None:
+            is_schedule = True
+            kinds = {row["schedule_kind"] for row in workbook_rows}
+            schedule_kind = next(iter(kinds)) if len(kinds) == 1 else None
+        elif is_schedule:
             schedule_kind = resolve_schedule_kind(source.name, schedule_kind)
             if not schedule_kind:
                 raise ValueError("Schedule CSV needs Full or Shared selection")
         elif schedule_kind:
-            raise ValueError("Full/Shared is only for schedule CSVs")
+            raise ValueError("Full/Shared is only for recognized schedule CSV/XLSX files")
         logical_id = UUID(document_id) if document_id else uuid4()
         profile = source_profile(source)
         if document_id:
@@ -236,15 +261,18 @@ class EvidenceStore:
                   'collection',j.collection_name,'state',j.state,'last_error',j.last_error,
                   'retryable',j.retryable,'attempts',j.attempt_count,'next_attempt_at',j.next_attempt_at))
                   FROM index_jobs j WHERE j.chunk_id=c.id),'[]'::jsonb) AS index_jobs,
-                r.decision AS latest_decision,r.source_verified,r.reviewer
+                r.decision AS latest_decision,r.source_verified,r.reviewer,r.approval_basis
                 FROM evidence_chunks c LEFT JOIN LATERAL (
-                    SELECT decision,source_verified,reviewer FROM review_decisions
+                    SELECT decision,source_verified,reviewer,approval_basis FROM review_decisions
                     WHERE chunk_id=c.id ORDER BY decision_order DESC LIMIT 1) r ON true
                 WHERE c.version_id=%s ORDER BY c.chunk_index NULLS LAST,c.created_at,c.id LIMIT %s OFFSET %s""",
                 (version_id, limit, offset),
             ).fetchall()
             total = db.execute("SELECT count(*) AS count FROM evidence_chunks WHERE version_id=%s",
                                (version_id,)).fetchone()["count"]
+            for chunk in chunks:
+                chunk["raw_warning_codes"] = chunk["warning_codes"]
+                chunk["warning_codes"] = _review_warning_codes(chunk["evidence_text"], chunk["raw_warning_codes"])
             return {"version": version, "chunks": chunks, "total_chunks": total,
                     "offset": offset, "next_offset": offset + limit if offset + limit < total else None,
                     "review_manifest_path": str(Path(version["artifact_path"]).with_name(
@@ -260,12 +288,26 @@ class EvidenceStore:
                    (d.current_version_id = v.id) AS is_current,
                    (SELECT count(*) FROM evidence_chunks c WHERE c.version_id=v.id) AS chunks,
                    (SELECT count(*) FROM evidence_chunks c WHERE c.version_id=v.id
-                    AND c.evidence_status='approved') AS approved_chunks
+                    AND c.evidence_status='approved') AS approved_chunks,
+                   (SELECT count(*) FROM evidence_chunks c WHERE c.version_id=v.id
+                    AND c.evidence_status='pending') AS held_chunks
                    FROM document_versions v JOIN documents d ON d.id=v.document_id
                    LEFT JOIN ingestion_jobs j ON j.version_id=v.id
                    WHERE d.tenant_id=%s ORDER BY v.created_at DESC, v.id DESC LIMIT %s""",
                 (tenant_id, limit),
             ).fetchall()
+
+    def library(self, tenant_id: str, model_version: str, collection: str) -> list[dict]:
+        versions = self.list_versions(tenant_id, 100)
+        with self.connect() as db:
+            counts = db.execute("""SELECT c.version_id,count(*) AS n FROM approved_current_evidence c
+                JOIN index_jobs j ON j.chunk_id=c.id WHERE c.tenant_id=%s AND j.model_version=%s
+                AND j.collection_name=%s AND j.state='indexed' GROUP BY c.version_id""",
+                (tenant_id, model_version, collection)).fetchall()
+        indexed = {str(row["version_id"]): row["n"] for row in counts}
+        for version in versions:
+            version["indexed_chunks"] = indexed.get(str(version["id"]), 0)
+        return versions
 
     def index_status(self, tenant_id: str, version_id: str) -> list[dict]:
         with self.connect() as db:
@@ -398,27 +440,28 @@ class EvidenceStore:
                 ),
             )
             if job["document_class"] == "schedule":
-                if parsed.metadata.schedule_kind not in ("full", "shared"):
+                if not schedule_rows or any(row.get("schedule_kind", parsed.metadata.schedule_kind) not in ("full", "shared") for row in schedule_rows):
                     raise ValueError("Schedule kind requires explicit Full/Shared classification")
                 # Send schedule rows in one database batch
                 db.cursor().executemany(
                     """INSERT INTO schedule_rows(version_id,tenant_id,document_id,
                         source_row_number,schedule_kind,technology_nm,flavor,trial_deadline,final_deadline,
-                        tapeout_date,estimated_ship_date) VALUES
-                        (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        tapeout_date,estimated_ship_date,source_sheet) VALUES
+                        (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         (
                             version_id,
                             job["tenant_id"],
                             job["document_id"],
                             row["source_row_number"],
-                            parsed.metadata.schedule_kind,
+                            row.get("schedule_kind", parsed.metadata.schedule_kind),
                             row["technology_nm"],
                             row["flavor"],
                             row["trial_deadline"],
                             row["final_deadline"],
                             row["tapeout_date"],
                             row["estimated_ship_date"],
+                            row.get("source_sheet", ""),
                         )
                         for row in schedule_rows
                     ),
@@ -514,6 +557,38 @@ class EvidenceStore:
                     (old,),
                 )
 
+    def accept_clean_text(self, tenant_id: str, version_id: str) -> dict:
+        """Accept only clean, never-reviewed text; never undo a person's decision."""
+        with self.connect() as db:
+            version = db.execute("""SELECT v.* FROM document_versions v JOIN documents d ON d.id=v.document_id
+                WHERE d.tenant_id=%s AND v.id=%s FOR UPDATE OF d""", (tenant_id, version_id)).fetchone()
+            if (not version or version["document_class"] != "document"
+                    or version["state"] not in {"review_needed", "approved", "indexing", "indexed"}):
+                raise ValueError("Parsed document unavailable for this tenant")
+            if checksum(Path(version["original_path"])) != version["source_sha256"]:
+                raise ValueError("Original source changed; submit a new version")
+            verified_markdown(Path(version["artifact_path"]), version["normalized_sha256"])
+            rows = db.execute("""SELECT c.* FROM evidence_chunks c WHERE c.version_id=%s
+                AND c.evidence_status='pending' AND NOT EXISTS
+                (SELECT 1 FROM review_decisions r WHERE r.chunk_id=c.id)
+                ORDER BY c.id FOR UPDATE OF c""", (version_id,)).fetchall()
+            accepted = 0
+            for row in rows:
+                if not clean_text_eligible(row["evidence_text"], row["chunk_type"], row["review_required"],
+                                           row["evidence_status"], row["warning_codes"]):
+                    continue
+                db.execute("""INSERT INTO review_decisions
+                    (id,chunk_id,decision,source_verified,reviewer,rationale,approval_basis)
+                    VALUES (%s,%s,'approved',false,'ingestion-policy',%s,%s)""",
+                    (uuid4(), row["id"], "Automatic clean-text acceptance; no human source check claimed", CLEAN_TEXT_POLICY))
+                db.execute("UPDATE evidence_chunks SET evidence_status='approved' WHERE id=%s", (row["id"],))
+                accepted += 1
+            counts = db.execute("""SELECT count(*) FILTER (WHERE evidence_status='approved') AS accepted,
+                count(*) FILTER (WHERE evidence_status='pending') AS held,
+                count(*) FILTER (WHERE evidence_status IN ('rejected','excluded')) AS excluded
+                FROM evidence_chunks WHERE version_id=%s""", (version_id,)).fetchone()
+            return {"newly_accepted": accepted, **counts, "policy": CLEAN_TEXT_POLICY}
+
     def record_review(
         self,
         tenant_id: str,
@@ -524,6 +599,17 @@ class EvidenceStore:
         rationale: str,
         source_verified: bool,
     ) -> None:
+        self.record_reviews(tenant_id, version_id, [source_chunk_id], decision,
+                            reviewer, rationale, source_verified)
+
+    def record_reviews(
+        self, tenant_id: str, version_id: str, source_chunk_ids: list[str],
+        decision: str, reviewer: str, rationale: str, source_verified: bool,
+    ) -> int:
+        """Explicit selection, one transaction, and a separate audit entry per chunk."""
+        if (not source_chunk_ids or len(source_chunk_ids) > 100
+                or len(set(source_chunk_ids)) != len(source_chunk_ids)):
+            raise ValueError("Select 1 to 100 distinct chunks from this version")
         if (
             decision not in ("approved", "rejected")
             or not reviewer.strip()
@@ -539,39 +625,38 @@ class EvidenceStore:
             db.execute("""SELECT d.id FROM documents d JOIN document_versions v ON v.document_id=d.id
                        WHERE d.tenant_id=%s AND v.id=%s FOR UPDATE OF d""",
                        (tenant_id, version_id)).fetchone()
-            row = db.execute(
+            rows = db.execute(
                 """SELECT c.id,c.evidence_text,c.evidence_status,d.current_version_id
                 FROM evidence_chunks c JOIN document_versions v ON v.id=c.version_id
                 JOIN documents d ON d.id=v.document_id WHERE d.tenant_id=%s AND v.id=%s
-                AND c.source_chunk_id=%s FOR UPDATE OF c""",
-                (tenant_id, version_id, source_chunk_id),
-            ).fetchone()
-            if not row or row["evidence_status"] == "excluded":
+                AND c.source_chunk_id=ANY(%s) ORDER BY c.id FOR UPDATE OF c""",
+                (tenant_id, version_id, source_chunk_ids),
+            ).fetchall()
+            if len(rows) != len(source_chunk_ids) or any(row["evidence_status"] == "excluded" for row in rows):
                 raise ValueError("Chunk unavailable for this tenant or excluded")
-            if (
-                decision == "approved"
-                and "Visual evidence on page" in row["evidence_text"]
-                and "no verified description" in row["evidence_text"]
-            ):
-                raise ValueError("Visual-gap placeholders cannot be approved")
-            db.execute(
-                """INSERT INTO review_decisions(id,chunk_id,decision,source_verified,reviewer,rationale)
-                          VALUES (%s,%s,%s,%s,%s,%s)""",
-                (uuid4(), row["id"], decision, source_verified, reviewer, rationale),
-            )
-            db.execute(
-                "UPDATE evidence_chunks SET evidence_status=%s WHERE id=%s", (decision, row["id"])
-            )
-            if row["current_version_id"] == UUID(version_id):
-                if decision == "approved":
-                    db.execute(
-                        "UPDATE index_jobs SET state='queued',retryable=true,attempt_count=0,next_attempt_at=now() WHERE chunk_id=%s AND state='superseded'",
-                        (row["id"],),
-                    )
-                else:
-                    db.execute(
-                        "UPDATE index_jobs SET state='superseded' WHERE chunk_id=%s", (row["id"],)
-                    )
+            for row in rows:
+                if (decision == "approved" and "Visual evidence on page" in row["evidence_text"]
+                        and "no verified description" in row["evidence_text"]):
+                    raise ValueError("Visual-gap placeholders cannot be approved")
+                db.execute(
+                    """INSERT INTO review_decisions(id,chunk_id,decision,source_verified,reviewer,rationale)
+                              VALUES (%s,%s,%s,%s,%s,%s)""",
+                    (uuid4(), row["id"], decision, source_verified, reviewer, rationale),
+                )
+                db.execute(
+                    "UPDATE evidence_chunks SET evidence_status=%s WHERE id=%s", (decision, row["id"])
+                )
+                if row["current_version_id"] == UUID(version_id):
+                    if decision == "approved":
+                        db.execute(
+                            "UPDATE index_jobs SET state='queued',retryable=true,attempt_count=0,next_attempt_at=now() WHERE chunk_id=%s AND state='superseded'",
+                            (row["id"],),
+                        )
+                    else:
+                        db.execute(
+                            "UPDATE index_jobs SET state='superseded' WHERE chunk_id=%s", (row["id"],)
+                        )
+        return len(rows)
 
     def publish(
         self,
@@ -592,10 +677,12 @@ class EvidenceStore:
                 raise ValueError("Version unavailable for this tenant")
             approved = db.execute(
                 """SELECT c.id FROM evidence_chunks c JOIN LATERAL
-                (SELECT decision,source_verified FROM review_decisions WHERE chunk_id=c.id
+                (SELECT decision,source_verified,approval_basis FROM review_decisions WHERE chunk_id=c.id
                  ORDER BY decision_order DESC LIMIT 1) r ON true
                 WHERE c.version_id=%s AND c.evidence_status='approved'
-                  AND r.decision='approved' AND r.source_verified
+                  AND r.decision='approved'
+                  AND evidence_acceptance_allowed(r.source_verified,r.approval_basis,c.review_required,
+                                                  c.warning_codes,c.chunk_type,c.evidence_text)
                   AND NOT (position('Visual evidence on page' in c.evidence_text)>0
                       AND position('no verified description' in c.evidence_text)>0)""",
                 (version_id,),
@@ -642,7 +729,7 @@ class EvidenceStore:
             rows = db.execute(
                 """SELECT j.id,j.attempt_count,j.chunk_id,j.point_id,j.model_version,c.source_chunk_id,
                    c.evidence_text,c.source_page_start,c.source_page_end,c.category,c.heading_path,
-                   c.faq_question,c.table_row_number,c.chunk_type,c.review_required,
+                   c.faq_question,c.table_row_number,c.chunk_type,c.review_required,c.source_verified,c.approval_basis,
                    v.id AS version_id,v.source_sha256,v.source_file,
                    d.id AS document_id,d.tenant_id
                 FROM index_jobs j JOIN approved_current_evidence c ON c.id=j.chunk_id
@@ -691,14 +778,14 @@ class EvidenceStore:
             )
 
     def index_done(self, job_id, attempt_count: int, *, error: str | None = None,
-                   retryable: bool = True):
+                   retryable: bool = True, retry_after_seconds: float = 0):
         with self.connect() as db:
             if error:
                 db.execute(
                     """UPDATE index_jobs SET state='failed',last_error=%s,retryable=%s,claimed_at=NULL,
-                  next_attempt_at=now()+(LEAST(3600, POWER(2,LEAST(attempt_count,10))) * interval '1 second'),
+                  next_attempt_at=now()+(LEAST(3600, GREATEST(POWER(2,LEAST(attempt_count,10)),%s)) * interval '1 second'),
                   updated_at=now() WHERE id=%s AND attempt_count=%s AND state='indexing'""",
-                    (error[:500], retryable, job_id, attempt_count),
+                    (error[:500], retryable, retry_after_seconds, job_id, attempt_count),
                 )
             else:
                 db.execute(
@@ -731,7 +818,7 @@ class EvidenceStore:
                  c.document_id,c.version_id,c.source_file,c.source_sha256,c.heading_path,
                  c.faq_question,c.unit_id,c.part_index,c.part_count,c.review_required,
                  c.parser_backend,c.parser_version,c.chunker_version,c.chunk_type,c.chunk_index,
-                 c.warning_codes,c.source_anchor,c.approval_order
+                 c.warning_codes,c.source_anchor,c.approval_order,c.source_verified,c.approval_basis
                  FROM approved_current_evidence c JOIN index_jobs j ON j.chunk_id=c.id
                  WHERE c.tenant_id=%s AND j.point_id=ANY(%s) AND j.model_version=%s
                    AND j.collection_name=%s AND j.state='indexed'""",
@@ -838,6 +925,87 @@ class EvidenceStore:
         values.append(limit)
         with self.connect() as db:
             return db.execute(query, values).fetchall()
+
+    def schedule_search(self, tenant_id, query, document_id=None):
+        """Count and page the same current-version snapshot with exact SQL.
+
+        Only a validated milestone identifier enters SQL; all user values are
+        bound parameters. Window ranking keeps every row on a nearest date.
+        """
+        from gsme_rag.retrieval.schedules import ScheduleQuery
+        if not tenant_id.strip() or not isinstance(query, ScheduleQuery):
+            raise ValueError("Tenant and validated schedule filters are required")
+        field = query.date_field
+        if field not in {"trial_deadline", "final_deadline", "tapeout_date", "estimated_ship_date"}:
+            raise ValueError("Unsupported milestone")
+        scope = """FROM schedule_rows r JOIN documents d ON d.id=r.document_id
+            JOIN document_versions v ON v.id=r.version_id
+            WHERE r.tenant_id=%s AND d.tenant_id=%s AND d.current_version_id=r.version_id
+              AND v.document_class='schedule' AND v.state IN ('approved','indexing','indexed')"""
+        values = [tenant_id, tenant_id]
+        if document_id:
+            scope += " AND r.document_id=%s::uuid"
+            values.append(document_id)
+        if query.schedule_kind != "both":
+            scope += " AND r.schedule_kind=%s"
+            values.append(query.schedule_kind)
+        where, filters = "", []
+        if query.technology_nm is not None:
+            where += " AND r.technology_nm=%s"
+            filters.append(query.technology_nm)
+        if query.flavor is not None:
+            where += " AND lower(r.flavor)=lower(%s)"
+            filters.append(query.flavor)
+        if query.date_from:
+            where += f" AND r.{field} >= %s"
+            filters.append(query.date_from)
+        if query.date_to:
+            where += f" AND r.{field} <= %s"
+            filters.append(query.date_to)
+        if query.deadline_status != "all":
+            where += " AND r.final_deadline " + (">=" if query.deadline_status == "open" else "<") + " %s"
+            filters.append(query.as_of)
+        cte = f"""WITH selected AS (SELECT r.*,v.source_file,v.source_sha256,
+            v.normalized_sha256,v.created_at AS imported_at,
+            dense_rank() OVER (ORDER BY r.{field}) AS date_rank {scope + where}) """
+        rank_filter = " WHERE date_rank <= %s" if query.next_dates else ""
+        params = values + filters + ([query.next_dates] if query.next_dates else [])
+        with self.connect() as db:
+            db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            sources = db.execute("""SELECT DISTINCT r.document_id,r.version_id,v.source_file,
+                v.source_sha256,v.normalized_sha256,v.created_at AS imported_at """ + scope +
+                " ORDER BY r.document_id,r.version_id", values).fetchall()
+            total = db.execute(cte + "SELECT count(*) AS n FROM selected" + rank_filter, params).fetchone()["n"]
+            rows = db.execute(cte + "SELECT * FROM selected" + rank_filter +
+                f" ORDER BY {field},schedule_kind,technology_nm,lower(flavor),document_id,source_sheet,source_row_number LIMIT %s OFFSET %s",
+                params + [query.limit, query.offset]).fetchall()
+        for row in rows:
+            row.pop("date_rank", None)
+        return {"rows": rows, "total": total, "sources": sources}
+
+    def schedule_catalog(self, tenant_id, document_id=None):
+        """Discover exact available fields without sending the schedule to an API."""
+        if not tenant_id.strip():
+            raise ValueError("Tenant is required")
+        scope = """ FROM schedule_rows r JOIN documents d ON d.id=r.document_id
+            JOIN document_versions v ON v.id=r.version_id
+            WHERE r.tenant_id=%s AND d.tenant_id=%s AND d.current_version_id=r.version_id
+              AND v.document_class='schedule' AND v.state IN ('approved','indexing','indexed')"""
+        values = [tenant_id, tenant_id]
+        if document_id:
+            scope += " AND r.document_id=%s::uuid"
+            values.append(document_id)
+        with self.connect() as db:
+            db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            facets = db.execute("SELECT DISTINCT r.schedule_kind,r.technology_nm,r.flavor" + scope +
+                               " ORDER BY r.schedule_kind,r.technology_nm,r.flavor LIMIT 1001", values).fetchall()
+            sources = db.execute("""SELECT r.document_id,r.version_id,v.source_file,v.source_sha256,
+                r.schedule_kind,r.source_sheet,count(*) AS row_count,min(r.tapeout_date) AS first_tapeout,
+                max(r.tapeout_date) AS last_tapeout,v.created_at AS imported_at""" + scope +
+                " GROUP BY r.document_id,r.version_id,v.source_file,v.source_sha256,r.schedule_kind,r.source_sheet,v.created_at"
+                " ORDER BY r.document_id,r.schedule_kind,r.source_sheet LIMIT 1001", values).fetchall()
+        return {"facets": facets[:1000], "facets_has_more": len(facets) > 1000,
+                "sources": sources[:1000], "sources_has_more": len(sources) > 1000}
 
     def estimated_vector_bytes(self, dimension: int) -> int:
         with self.connect() as db:

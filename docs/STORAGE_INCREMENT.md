@@ -15,18 +15,30 @@ docker compose -f compose.local.yaml ps
 .\.venv\Scripts\python.exe -m gsme_rag.storage.admin
 ```
 
-Open **http://127.0.0.1:8010/**. The server loads `.env` at startup, so restart it after editing token, reviewer or provider settings. Upgrade 0.15.5 adds migration 003 for source ordering, immutable evidence and retry state. Migrations are packaged under `src/gsme_rag/storage/migrations/`.
+Open **http://127.0.0.1:8010/**. The server loads `.env` at startup, so restart it after editing token, reviewer or provider settings. Migrations include 003 for source ordering/immutable evidence/retry state, 004 for automatic clean-text acceptance provenance, and 005 for sheet-aware workbook schedules. They are packaged under `src/gsme_rag/storage/migrations/`. [Exact schedule search and CLI](SCHEDULE_SEARCH.md) and [submission checklist](SUBMISSION_GUIDE.md) describe the 0.18.0 increment.
 
-## Local evidence console
+## Normal use: find sources
 
-Version 0.16.0 adds mandatory reranking in section 4 without a new SQL migration. See [retrieval setup and evaluation](RETRIEVAL.md), including the separate `GSME_RERANK_CONTENT_APPROVED` permission. The old unreranked search remains a labelled diagnostic baseline. Existing 0.15.5 parser/chunker identities and embeddings remain valid.
+In 0.16.4 the home page is a question box and cited source matches. Connect with your local token, then search. **Documents** opens the compact upload/library panel. **Settings & help** contains provider selection, logs and advanced tools; it is not necessary to inspect individual chunks to use clean evidence. Real Cohere mode needs the configured external/rerank permissions and visible content consent. Local demo rankings are not semantic quality results.
 
-1. Enter the token, workspace `local-test`, and the exact reviewer ID configured in `.env`. Check connection to verify PostgreSQL and Qdrant are reachable.
-2. Upload a small FAQ DOCX, PDF or `examples/synthetic_reviewed_faq.docx`. Click **Parse uploaded job**. For a new version of an existing document, supply its document ID before upload.
-3. Load the chunks, download the original and inspect Markdown/warnings. Navigate through chunks in source order. For each chunk you checked, write a review note describing the page/paragraph and result, tick that chunk's source-check box, and approve. Reject uncertain content. A missing source answer must stay missing.
-4. Select Fake vectors for a workflow test or Cohere for real embeddings. Click **Publish approved version**; this queues only source-approved evidence. For Cohere also enable external permission in `.env` and tick the send-content box. Click **Index one batch**, then inspect job states. Repeat while queued jobs remain. Zero newly indexed does not prove all jobs succeeded: failures, retries and next-attempt times are displayed with each chunk.
-5. Embedding preview becomes available for a currently approved indexed chunk with the selected provider. It shows model, point identity, dimension and a short coordinate sample. Those coordinates do not explain semantic meaning. In section 4, select candidate strategy/count, confirm external processing for Cohere, then click **Retrieve and rerank**. Compare initial and reranked positions, inspect cited context and warnings. Results are evidence candidates, not generated answers or calibrated confidence.
-6. Reject an approved chunk to revoke it. Search immediately excludes it. **Clean stale vectors** removes the stale Qdrant point. Publishing a new document version similarly removes the previous version from authoritative search immediately.
+The main result is a source extract, not a generated answer. Up to 30 eligible passages are reranked and up to 5 matches are displayed. The actual count appears after search. Review-held content stays excluded. Use `/admin` only when handling an extraction exception or inspecting the pipeline. [Current verification and remaining gaps](CHANGES_0.16.4.md).
+
+Since 0.16.5, the optional **Also generate a cited answer** checkbox enables Command-first generation with local Qwen/Ollama operational fallback. It needs separate `GSME_ANSWER_CONTENT_APPROVED=yes`, not just rerank permission; see [answer setup and limits](CHANGES_0.16.5.md). Without that opt-in the existing source-extract workflow is unchanged. Missing evidence still leads to abstention, not a second model guessing an answer.
+
+For the locally evaluated corpus, use workspace `local-test` and collection `gsme_evidence_v1`. A PowerShell `$env:GSME_COLLECTION` override from an older synthetic demo takes precedence over `.env`; remove that override or set the intended collection before starting the server. Other tenant/collection/provider combinations do not automatically expose this corpus.
+
+## Advanced evidence console (`/admin`)
+
+The advanced console retains four screens: **Documents**, **Review & index**, **Ask sources**, **Schedules**. The normal path is **Ingest document → Ask sources**, not review of every chunk. Clean text is accepted automatically; extraction problems stay stored but out of search. See [automatic ingestion](CHANGES_0.16.3.md). Detailed IDs and manual review are advanced tools.
+
+Mandatory reranking needs no new SQL migration. See [retrieval setup and evaluation](RETRIEVAL.md), including the separate `GSME_RERANK_CONTENT_APPROVED` permission. The old unreranked search remains a labelled diagnostic baseline. Ingest a new version to apply the 0.16.1 hyperlink/parser changes to older documents; old chunks are not modified in place.
+
+1. Enter the token and workspace in **Connection & workspace** and connect. A reviewer name is needed only for manual exception review. Choose **Local demo** or **Cohere** as the working mode.
+2. In **Documents**, choose a file and click **Ingest document**. It parses, accepts eligible clean text, publishes and indexes it. Cohere needs permission in `.env` and the visible document-level send-content checkbox. No review rationale is needed. To replace a logical document, supply its ID under replacement details first.
+3. Read the accepted/held counts. Searchable text leads directly to **Ask sources**. Held content stays out of search; it can remain unresolved without rejecting every chunk. Inferred PDF/Docling table rows remain held even when other paragraphs are clean. Use a faithful unmerged DOCX FAQ table or corrected original where available; do not silently clear extraction flags.
+4. Optional: inspect extraction issues in **Review & index** and manually approve only what you checked, with a review note. **Parse only** retains the strict manual workflow. **Ingest clean text (no review notes)** applies automatic ingestion to an existing parsed version without overriding any earlier review. Processing is bounded to twenty batches per request; failed/future-due jobs stay visible and can be continued with the ingestion button or scoped worker.
+5. In **Ask sources**, enter a question and search approved evidence. Cohere asks for per-request external confirmation. Open source details or ranking diagnostics when needed. Clickable URLs are source links, not ingested website content. Results are evidence candidates, not generated answers or confidence percentages. Embedding previews remain available from eligible indexed review cards; coordinates do not explain semantic meaning.
+6. Reject a chunk to revoke it; search excludes it immediately. Advanced **Clean stale vectors** removes the stale point. Publishing a new version similarly removes the previous version from authoritative search immediately.
 
 If PostgreSQL says a chunk is indexed but its Qdrant point was lost, use **Check for missing stored vectors**. It requeues missing points in the selected tenant/version/provider; the separate Index action recreates them after the normal approval checks.
 
@@ -59,6 +71,16 @@ $env:GSME_TEST_MANUAL_PDF = "D:\Downloads\MFG-GSME-0002.pdf"
 Create the test database once. Integration tests use distinct synthetic tenants/collections. `tools/demo_storage_fixture.py` is a separate synthetic indexing/revocation smoke; `--provider cohere` sends only its newly generated synthetic FAQ and requires the configured external permission. `tools/validate_pdf_backend.py` records a native or real Docling run; inspect `strategy_used`. `tools/audit_sources.py` can audit supplied documents into ignored local output.
 
 ## Troubleshooting
+
+For stage logs, start the server normally and use **Settings & help → Recent logs** on the home page (or the advanced console's connection/log controls), or watch `data/logs/console.log` in PowerShell:
+
+```powershell
+Get-Content .\data\logs\console.log -Tail 50 -Wait
+```
+
+Logs identify stages, counts, durations and request IDs without recording source text or credentials. Reranking preflight names the missing settings. If you authorize Cohere reranking, add `GSME_RERANK_CONTENT_APPROVED=yes` to your private `.env`, preserve the existing API key/general permission, and restart. A browser checkbox alone does not enable the server setting.
+
+Release 0.16.2 fixes Windows newline-only Markdown 409s and supports explicit selected-chunk batch review. See [the release notes](CHANGES_0.16.2.md). You can leave unverified chunks pending; only approved chunks are indexed. Batch approval still requires checking every selected source record and leaves a separate audit decision for each.
 
 | Message | Next action |
 | --- | --- |

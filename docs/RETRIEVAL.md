@@ -1,6 +1,8 @@
-# Retrieval and mandatory reranking — 0.16.0
+# Retrieval and mandatory reranking — 0.18.0
 
-This release retrieves approved evidence. It does **not** generate a conversational answer. The local console remains at `http://127.0.0.1:8010/`; neither the retrieval API nor the operator token belongs on the public parsing application.
+The retrieval service returns approved evidence. Optional generation adds cited answers using Command first and local Ollama on operational failure. [0.17.0 strategies, real-source results, citation-selection fix and remaining acceptance work](CHANGES_0.17.0.md). Generation is opt-in with separate content permission. The local console remains at `http://127.0.0.1:8010/`; neither retrieval nor its operator token belongs on the public parsing application.
+
+The main `/` page is a search-first interface with cited extracts and a collapsible document panel. `/admin` retains advanced review, exact schedules and diagnostics. Normal searches request at most 30 candidates, rerank the eligible subset in one call and show at most 5 matches. `rerank_input_count` reports the actual count. Parser/retrieval identities are 0.18.0; document chunker remains 0.17.0. [Schedule search](SCHEDULE_SEARCH.md) is a separate exact SQL path with local calendar/filter planning, no mandatory external rerank, and source-linked pagination. [Submission and demo](SUBMISSION_GUIDE.md).
 
 ## Implemented flow
 
@@ -25,7 +27,7 @@ docker compose -f compose.local.yaml up -d
 .\.venv\Scripts\python.exe -m gsme_rag.storage.admin
 ```
 
-0.16.0 needs no new SQL migration. Parser/chunker identities remain at 0.15.5 because their algorithms did not change in this increment; upgrading ranking alone does not invalidate those extraction identities.
+Neither 0.16.0 nor 0.16.1 adds a new SQL migration. Ranking-only changes in 0.16.0 did not invalidate extraction identities. The 0.16.1 hyperlink/review changes do advance parser/chunker identities; ingest a new source version to apply those fixes.
 
 Real retrieval needs indexed Cohere embeddings, model access and these private settings:
 
@@ -46,7 +48,7 @@ Fake embeddings and `synthetic-word-overlap-v1` reranking are paired fixtures in
 
 ## Interface and API
 
-Section 4 shows candidate strategy, candidate count, result count, exact optional filters, an external-send confirmation, a before/after ranking table, cited evidence, warnings, timing and raw diagnostics. Source download uses the existing authenticated checksum-checked endpoint. The old `/api/search` and CLI `search` remain **diagnostic baselines**, clearly labelled as not reranked; production retrieval consumers should use `/api/retrieve`.
+The main page shows one question, optional document scope, the strongest source extract, expandable alternatives and an actual rerank count. Advanced candidate controls, before/after rankings and diagnostics remain at `/admin`. Source opening uses the authenticated checksum-checked endpoint. `/api/search` and CLI `search` remain **diagnostic baselines**, not the reranked product path; consumers should use `/api/retrieve`.
 
 `POST /api/retrieve` uses the existing local `X-GSME-Token` authentication and origin/loopback restrictions. Example document body:
 
@@ -102,7 +104,11 @@ Each positive case needs `tenant_id`, `question` and `expected_evidence: [{versi
 
 ## Verified results and remaining work
 
-Verification record, 3 November 2026:
+The records below are historical. Current answer-generation results are in [0.17.0](CHANGES_0.17.0.md); current schedule/source regressions and full-suite results are in [0.18.0](CHANGES_0.18.0.md).
+
+Latest verification, 6 November 2026: **230 tests passed with zero skips** and the search-first browser workflow passed. An explicitly authorized real-source run indexed 29 FAQ and 246 manual passages. All 18 ready, **source-filtered** positive cases found the target in the top 5 (17 at rank 1); both out-of-scope cases still returned candidates. Table/blank/held cases are recorded separately, not counted as positive answers. See [0.16.4 results, actual rerank counts and limitations](CHANGES_0.16.4.md). Private source-backed cases/results stay under ignored `validation/product-evaluation/`.
+
+Historical verification record, 3 November 2026 (synthetic fixture, before the real-source run):
 
 | Check | Result |
 | --- | --- |

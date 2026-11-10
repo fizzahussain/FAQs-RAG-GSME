@@ -15,6 +15,14 @@ def source_profile(source: Path, pdf_backend: str | None = None) -> dict:
             return None
 
     profile = {}
+    chunk_strategy = os.getenv("GSME_CHUNK_STRATEGY", "auto")
+    if chunk_strategy not in {"auto", "layout_aware", "hybrid", "paragraph_aware", "semantic"}:
+        raise ValueError("Invalid ingestion chunk strategy")
+    if chunk_strategy != "auto":
+        profile["chunk_strategy"] = chunk_strategy
+        if chunk_strategy == "semantic":
+            from gsme_rag.chunking.semantic import LocalSemanticEmbeddings
+            profile["semantic_boundary_model_digest"] = LocalSemanticEmbeddings().digest
     suffix = source.suffix.lower()
     if suffix == ".pdf":
         backend = (pdf_backend or os.getenv("GSME_PDF_BACKEND", "auto")).casefold()
@@ -27,7 +35,11 @@ def source_profile(source: Path, pdf_backend: str | None = None) -> dict:
             profile["docling_parse"] = installed("docling-parse")
     if suffix == ".docx":
         profile["python_docx"] = installed("python-docx")
-    if suffix != ".csv":
+    if suffix == ".pptx":
+        profile["python_pptx"] = installed("python-pptx")
+    if suffix == ".xlsx":
+        profile["openpyxl"] = installed("openpyxl")
+    if suffix not in {".csv", ".xlsx", ".pptx"}:
         ocr = tesseract_environment()
         profile["tesseract_available"] = ocr["executable"] is not None
         profile["english_ocr_available"] = ocr["english_available"]

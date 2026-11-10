@@ -5,6 +5,7 @@ import re
 from gsme_rag.models import ChunkResult, DocumentMetadata, MarkdownChunk, ParseWarning
 from gsme_rag.parsing.markdown import normalize_control_markers, split_table_row
 from gsme_rag.parsing.schedules import is_schedule_header, resolve_schedule_kind
+from gsme_rag.parsing.links import missing_link_reference
 from gsme_rag.version import CHUNKER_VERSION
 
 
@@ -697,11 +698,15 @@ def chunk_markdown(
     metadata: DocumentMetadata | None = None,
     semantic_schedule_rows: bool = False,
     content_route: str | None = None,
+    semantic_embedder=None,
+    semantic_model: str | None = None,
 ) -> ChunkResult:
     if not 200 <= max_chars <= 20_000:
         raise ValueError("max_chars must be between 200 and 20000")
-    if strategy not in {"auto", "fixed_size", "layout_aware", "hybrid", "paragraph_aware"}:
-        raise ValueError("strategy must be auto, fixed_size, layout_aware, hybrid, or paragraph_aware")
+    if strategy not in {"auto", "fixed_size", "layout_aware", "hybrid", "paragraph_aware", "semantic"}:
+        raise ValueError("Unknown structural/semantic chunking strategy")
+    if strategy == "semantic" and (not callable(semantic_embedder) or not semantic_model):
+        raise ValueError("Semantic chunking requires an explicit boundary embedder and model identity")
     if content_route not in {None, "faq", "paper"}:
         raise ValueError("content_route must be faq, paper, or omitted for automatic routing")
     if strategy == "hybrid" and not 0 <= overlap_chars <= max_chars // 4:
@@ -789,7 +794,11 @@ def chunk_markdown(
             use_overlap = strategy in {"auto", "hybrid"} and unit.kind == "section" and len(unit.body) > body_limit
             effective_overlap = min(overlap_chars, body_limit // 4) if use_overlap else 0
             part_limit = body_limit - effective_overlap
-            body_parts = _split_text(unit.body, part_limit)
+            if strategy == "semantic" and unit.kind == "section":
+                from gsme_rag.chunking.semantic import semantic_split
+                body_parts = semantic_split(unit.body, part_limit, semantic_embedder)
+            else:
+                body_parts = _split_text(unit.body, part_limit)
             if use_overlap:
                 body_parts = _overlap_parts(body_parts, body_limit, effective_overlap)
         else:
@@ -819,7 +828,7 @@ def chunk_markdown(
             # Parser and chunker versions keep old approvals from crossing revisions
             digest = hashlib.sha256(
                 f"{source_id}|{metadata.parser_version if metadata else 'unversioned'}|"
-                f"{CHUNKER_VERSION}|{normalized_hash}|{strategy}|{index}|{text}".encode("utf-8")
+                f"{CHUNKER_VERSION}|{normalized_hash}|{strategy + ':' + semantic_model if strategy == 'semantic' else strategy}|{index}|{text}".encode("utf-8")
             ).hexdigest()[:16]
             chunks.append(
                 MarkdownChunk(
@@ -831,7 +840,7 @@ def chunk_markdown(
                     heading_path=unit.heading_path.copy(),
                     category=unit.category or (
                         unit.heading_path[-1]
-                        if unit.kind == "question_answer" and unit.heading_path else None
+                        if (unit.kind == "question_answer" or unit.kind == "table_row" and unit.anchor) and unit.heading_path else None
                     ),
                     source_page_start=unit.page_start,
                     source_page_end=unit.page_end,
@@ -851,7 +860,7 @@ def chunk_markdown(
                         and 2 <= unit.table_row_number < len(metadata.csv_source_rows) + 2
                         else None
                     ),
-                    review_required=unit.review_required or len(text) > max_chars,
+                    review_required=unit.review_required or len(text) > max_chars or missing_link_reference(text),
                     evidence_status=(
                         "excluded" if bool(re.search(r"\.{8,}\s*\d{1,4}\b", unit.body))
                         or unit.body.strip().isdigit()
@@ -865,6 +874,11 @@ def chunk_markdown(
             )
 
     if any(chunk.review_required for chunk in chunks):
+        for index, chunk in enumerate(chunks):
+            if missing_link_reference(chunk.text):
+                warnings.append(ParseWarning("link_target_missing",
+                    "This chunk refers to 'here' without a destination; inspect the source and do not invent a URL",
+                    f"chunk {index}"))
         warnings.append(ParseWarning(
             code="review_required",
             message="Some chunks contain OCR or uncertain table text; verify them against the source before indexing",

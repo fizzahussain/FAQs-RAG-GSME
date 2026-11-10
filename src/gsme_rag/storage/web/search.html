@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GSME Muse · Find answers</title><link rel="stylesheet" href="/assets/search.css?v=0.17.0">
+<script defer src="/assets/evidence.js?v=0.17.0"></script><script defer src="/assets/search.js?v=0.17.0"></script></head>
+<body><main>
+<header><a class="brand" href="/">GSME <span>Muse</span></a><button id="documentsToggle" class="secondary" aria-expanded="false" aria-controls="documents">Documents</button></header>
+<section id="login"><h1>Your documents. Clear sources.</h1><p>Connect once, then ask a question or add a document.</p>
+<form id="loginForm"><label for="accessToken">Local access token</label><input id="accessToken" type="password" autocomplete="off" required><button>Connect</button></form>
+<details><summary>Workspace settings</summary><label for="workspace">Workspace</label><input id="workspace" value="local-test"></details></section>
+<div id="notice" role="status" aria-live="polite"></div>
+<section id="documents" hidden><div class="section-title"><h2>Documents</h2><button id="closeDocuments" class="secondary">Close</button></div>
+<form id="uploadForm"><label for="documentFile">Add a PDF, Word document, presentation, spreadsheet, image or CSV</label><input id="documentFile" type="file" accept=".pdf,.docx,.pptx,.xlsx,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp" required>
+<label id="uploadConsentLabel" class="check"><input id="uploadConsent" type="checkbox"> Allow accepted text from this document to be embedded by Cohere</label>
+<details><summary>Schedule CSV options</summary><label for="scheduleKind">Schedule type</label><select id="scheduleKind"><option value="">Automatic</option><option value="full">Full</option><option value="shared">Shared</option></select></details>
+<button id="uploadButton">Add document</button></form><p id="uploadStatus" role="status"></p><button id="continueIndex" class="secondary" hidden>Continue indexing this document</button><div id="documentList"></div>
+<p class="quiet">Flagged extraction stays out of search. Manage exceptions in <a href="/admin">advanced tools</a>.</p></section>
+<section id="ask" hidden><p class="eyebrow">GSME MUSE · SOURCE SEARCH</p><h1>What would you like to know?</h1>
+<p class="intro">Find answers in your FAQs and technical documents, with the original source attached.</p>
+<form id="askForm"><label for="askQuestion" class="sr-only">Your question</label><textarea id="askQuestion" rows="2" placeholder="For example: Who coordinates the shared tapeout participants?" required maxlength="20000"></textarea>
+<div class="search-actions"><label for="sourceFilter" class="sr-only">Search document</label><select id="sourceFilter"><option value="">All documents</option></select><button id="askButton">Find sources</button></div>
+<label id="searchConsentLabel" class="check"><input id="searchConsent" type="checkbox"> Allow this question and up to 30 matching passages to be reranked by Cohere</label>
+<label id="answerConsentLabel" class="check"><input id="answerConsent" type="checkbox"> Also generate a cited answer using Cohere Command, with local Ollama fallback if unavailable</label></form>
+<p id="searchStatus" role="status"></p><div id="matches"></div>
+<p id="searchNote" class="quiet">These are source extracts, not an AI-written answer. A relevant match does not prove a claim.</p>
+<details id="searchDetails"><summary>Search details</summary><p id="counts"></p><pre id="requestDetails"></pre></details></section>
+<footer><details id="settings"><summary>Settings &amp; help</summary><label for="searchProvider">Search mode</label><select id="searchProvider"><option value="cohere">Cohere · real retrieval</option><option value="fake">Local demo · not a quality test</option></select>
+<label for="retrievalStrategy">Retrieval</label><select id="retrievalStrategy"><option value="hybrid">Hybrid: semantic + keywords</option><option value="dense">Semantic only</option></select>
+<label for="queryMode">Query handling</label><select id="queryMode"><option value="original">Original question</option><option value="expanded">Add domain terminology</option><option value="multi">Multi-query · up to 3 query embeddings</option></select>
+<label class="check"><input id="autoRoute" type="checkbox"> Recognize schedule requests automatically; ask before inferring dates or technology</label>
+<p>Search retrieves up to 30 candidates, reranks eligible passages, and shows up to 5 matches. No whole-document rerank.</p>
+<button id="logsButton" class="secondary">Recent logs</button><button id="disconnect" class="secondary">Switch workspace / disconnect</button><pre id="logsOutput"></pre><p><a href="/admin">Advanced administration</a> · <a href="/docs">API reference</a></p></details></footer>
+</main></body></html>

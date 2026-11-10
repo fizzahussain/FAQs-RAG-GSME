@@ -7,6 +7,18 @@ import re
 from typing import Protocol
 
 from gsme_rag.storage.providers import ProviderOperationError
+from gsme_rag.observability import emit
+
+
+def missing_rerank_settings() -> list[str]:
+    """Return setting names/instructions only, never API-key values."""
+    missing = []
+    if not os.getenv("COHERE_API_KEY"):
+        missing.append("COHERE_API_KEY")
+    for name in ("GSME_EXTERNAL_CONTENT_APPROVED", "GSME_RERANK_CONTENT_APPROVED"):
+        if os.getenv(name) != "yes":
+            missing.append(name + "=yes")
+    return missing
 
 
 @dataclass(frozen=True)
@@ -53,10 +65,11 @@ class CohereReranker:
 
     def __init__(self, model: str = "rerank-v5.0-pro", timeout: float = 30.0,
                  max_tokens_per_doc: int = 8192):
-        if (not os.getenv("COHERE_API_KEY")
-                or os.getenv("GSME_EXTERNAL_CONTENT_APPROVED") != "yes"
-                or os.getenv("GSME_RERANK_CONTENT_APPROVED") != "yes"):
-            raise ValueError("Cohere reranking requires API access and both external-content and rerank-content approval")
+        missing = missing_rerank_settings()
+        if missing:
+            emit("rerank.preflight.blocked", missing_settings=missing)
+            raise ValueError("Cohere reranking approval/configuration missing: " + ", ".join(missing)
+                             + ". Update local .env and restart the console. No rerank request was sent")
         if model not in {"rerank-v5.0-pro", "rerank-v5.0-fast"}:
             raise ValueError("Unsupported pinned rerank model")
         if not 1 <= timeout <= 120 or not 1024 <= max_tokens_per_doc <= 8192:
@@ -79,6 +92,7 @@ class CohereReranker:
                for text in documents):
             raise ValueError("Rerank query/passage exceeds conservative input budget; request not sent and evidence not truncated")
         try:
+            emit("rerank.provider.request", candidates=len(documents), model=self.model_version)
             response = self.client.rerank(
                 model=self.model_version, query=question, documents=documents,
                 top_n=len(documents), max_tokens_per_doc=self.max_tokens_per_doc,
@@ -91,6 +105,8 @@ class CohereReranker:
                                and math.isfinite(value) and value >= 0}
         except Exception as error:
             status = getattr(error, "status_code", None)
+            emit("rerank.provider.failed", error_type=type(error).__name__, status=status if isinstance(status, int) else None,
+                 model=self.model_version)
             reason = "rate limited; retry later" if status == 429 else "check rerank-model access, API key and network"
             raise ProviderOperationError(f"Cohere reranking failed ({'HTTP ' + str(status) if isinstance(status, int) else 'no HTTP status'}); {reason}") from None
         return validate_ranking(ranked, len(documents))

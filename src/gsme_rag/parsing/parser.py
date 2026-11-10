@@ -2,6 +2,9 @@ from pathlib import Path
 import hashlib
 import csv
 from zipfile import BadZipFile
+from lxml.etree import XMLSyntaxError
+from openpyxl.utils.exceptions import InvalidFileException
+from pptx.exc import PackageNotFoundError as PptxPackageNotFoundError
 
 import pymupdf as fitz
 from docx.opc.exceptions import PackageNotFoundError
@@ -10,8 +13,10 @@ from gsme_rag.parsing.csv import parse_csv_to_markdown
 from gsme_rag.parsing.docx import parse_docx_to_markdown
 from gsme_rag.parsing.image import parse_image_to_markdown
 from gsme_rag.models import DocumentMetadata, ParsedDocument
-from gsme_rag.parsing.schedules import is_schedule_header, make_source_id, resolve_schedule_kind
+from gsme_rag.parsing.schedules import is_schedule_header, make_source_id, resolve_schedule_kind, parse_schedule_workbook
 from gsme_rag.parsing.pdf import parse_pdf_to_markdown
+from gsme_rag.parsing.links import missing_link_warnings
+from gsme_rag.parsing.office import parse_pptx_to_markdown, parse_xlsx_to_markdown
 
 
 def parse_to_markdown(
@@ -30,6 +35,10 @@ def parse_to_markdown(
     try:
         if suffix == ".docx":
             result = parse_docx_to_markdown(input_path, source_name=source_name)
+        elif suffix == ".pptx":
+            result = parse_pptx_to_markdown(input_path, source_name=source_name)
+        elif suffix == ".xlsx":
+            result = parse_xlsx_to_markdown(input_path, source_name=source_name)
         elif suffix == ".pdf":
             result = parse_pdf_to_markdown(input_path, source_name=source_name, backend=pdf_backend)
         elif suffix == ".csv":
@@ -37,9 +46,10 @@ def parse_to_markdown(
         elif suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}:
             result = parse_image_to_markdown(input_path, source_name=source_name)
         else:
-            raise ValueError("Input must be a DOCX, PDF, CSV, PNG, JPEG, TIFF, or BMP file")
-    except (fitz.FileDataError, BadZipFile, PackageNotFoundError, csv.Error) as error:
+            raise ValueError("Input must be a DOCX, PPTX, XLSX, PDF, CSV, PNG, JPEG, TIFF, or BMP file")
+    except (fitz.FileDataError, BadZipFile, PackageNotFoundError, PptxPackageNotFoundError, InvalidFileException, XMLSyntaxError, csv.Error) as error:
         raise ValueError(f"The {suffix.lstrip('.').upper()} file is invalid or unreadable") from error
+    result.warnings.extend(missing_link_warnings(result.markdown))
     # Read the original in blocks so a large file is never hashed in memory
     digest_builder = hashlib.sha256()
     with input_path.open("rb") as source:
@@ -53,8 +63,15 @@ def parse_to_markdown(
     if suffix == ".csv":
         header = next((line for line in result.markdown.splitlines() if line.startswith("|")), "")
         is_schedule = is_schedule_header(header.strip("|").split("|"))
-    kind = resolve_schedule_kind(result.filename, schedule_kind) if is_schedule else None
+    workbook_rows = parse_schedule_workbook(input_path, schedule_kind) if suffix == ".xlsx" else None
+    if workbook_rows is not None:
+        is_schedule = True
+        kinds = {row["schedule_kind"] for row in workbook_rows}
+        kind = next(iter(kinds)) if len(kinds) == 1 else None
+    else:
+        kind = resolve_schedule_kind(result.filename, schedule_kind) if is_schedule else None
     kind_source = (
+        "worksheet" if workbook_rows is not None else
         "filename" if kind and resolve_schedule_kind(result.filename) == kind
         else "user" if kind else None
     )
@@ -67,7 +84,7 @@ def parse_to_markdown(
         document_class="schedule" if is_schedule else "document",
         schedule_kind=kind,
         schedule_kind_source=kind_source,
-        classification_status="needs_schedule_kind" if is_schedule and not kind else "ready",
+        classification_status="needs_schedule_kind" if is_schedule and not kind and workbook_rows is None else "ready",
         csv_source_rows=result.csv_source_rows if is_schedule else None,
     )
     for evidence in result.evidence_diagnostics:

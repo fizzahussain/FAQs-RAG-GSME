@@ -39,12 +39,10 @@ def prepare_candidate(
 ) -> IndexCandidate:
     """Check review and token limits without truncating text"""
     if (ledger.approved(chunk.content_sha256, chunk.chunk_id)
-            and not ledger.approved(chunk.content_sha256, chunk.chunk_id, require_source_verification=True)):
+            and ledger.status_for(chunk) != "approved"):
         raise CandidateValidationError("Source-verified approval is required for indexing")
     if not eligible_for_embedding(chunk, ledger):
         raise CandidateValidationError("Chunk is not source-approved for indexing")
-    if not ledger.approved(chunk.content_sha256, chunk.chunk_id, require_source_verification=True):
-        raise CandidateValidationError("Source-verified approval is required for indexing")
     if not re.fullmatch(r"[0-9a-f]{64}", chunk.content_sha256):
         raise CandidateValidationError("A valid lowercase source SHA-256 is required")
     if not tenant_id.strip() or not model_version.strip():

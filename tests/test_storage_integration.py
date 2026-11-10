@@ -24,6 +24,15 @@ ENABLED = bool(DB and QDRANT and "/gsme_rag_test" in DB)
 
 @skipUnless(ENABLED, "Requires real isolated PostgreSQL and Qdrant services")
 class StorageIntegrationTests(TestCase):
+    def test_identical_approved_text_reuses_vectors_without_cross_tenant_reuse(self):
+        self._approved_faq()
+        initial_calls = self.provider.calls
+        same = self._approved_faq()  # independent logical document; independently approved
+        self.assertEqual(self.provider.calls, initial_calls)
+        self.assertTrue(same["version_id"])
+        self._approved_faq(self.other)
+        self.assertEqual(self.provider.calls, initial_calls + 1)
+
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -35,8 +44,17 @@ class StorageIntegrationTests(TestCase):
         self.store.migrate()
         self.provider = FakeEmbeddings(32)
         self.vectors = QdrantEvidence(QDRANT, self.settings.collection, 32)
+        self.addCleanup(self._cleanup_vectors)
         self.tenant = "test-" + uuid4().hex
         self.other = "test-" + uuid4().hex
+
+    def _cleanup_vectors(self):
+        # Remove only this test's randomly named derived collection, never user data.
+        try:
+            if self.vectors.client.collection_exists(self.vectors.collection):
+                self.vectors.client.delete_collection(self.vectors.collection)
+        finally:
+            self.vectors.client.close()
 
     def _approved_faq(self, tenant=None, document_id=None, source=None):
         tenant = tenant or self.tenant
@@ -187,6 +205,82 @@ class StorageIntegrationTests(TestCase):
             self.assertEqual(self.store.schedules(self.other, kind), [])
         self.assertEqual(self.store.schedules(self.tenant, "full", technology_nm=14), [])
 
+    def _schedule_fixture(self, document_id=None, rows=None):
+        source = Path(self.temp.name) / "shared_schedules.csv"
+        source.write_text("Tech (nm),Flavor,Trial,Final,Tapeout,Est. Ship\n" + (rows or
+            "28,HPC+ RF,2026-10-01,2026-10-15,2026-11-01,2026-12-01\n"
+            "28,HPC+ RF,2026-10-10,2026-11-10,2026-11-11,2026-12-11\n"
+            "65,LP,2026-10-10,2026-11-10,2026-11-11,2026-12-11\n"
+            "28,HPC+ RF,2026-11-01,2026-11-17,2026-11-18,2026-12-18\n"), encoding="utf-8")
+        submitted = self.store.submit(self.tenant, source, self.settings.data_dir, document_id)
+        result = process_ingestion(self.store, self.settings, submitted["job_id"])
+        self.assertEqual(result["state"], "ready")
+        return submitted
+
+    def test_schedule_nearest_ties_date_fields_status_and_literal_filters(self):
+        from datetime import date
+        from gsme_rag.retrieval.schedules import ScheduleQuery, search_schedules
+        self._schedule_fixture()
+        def search(**fields):
+            return search_schedules(self.store, self.tenant, ScheduleQuery(as_of=date(2026, 11, 10), **fields))
+        nearest = search(question="Next shared tapeout")
+        self.assertEqual([r["source_row_number"] for r in nearest["results"]], [3, 4])
+        self.assertEqual(nearest["total"], 2)
+        self.assertTrue(all(r["source_sha256"] and r["record_id"] and r["source_url"] for r in nearest["results"]))
+        self.assertEqual(search(question="Next shared 28nm tapeout")["total"], 1)
+        self.assertEqual(search(question="Shared final deadlines today")["total"], 2)
+        self.assertEqual(search(question="Shared schedules next week")["total"], 1)
+        self.assertEqual(search(question="Shared open schedules")["total"], 3)
+        self.assertEqual(search(question="Shared closed schedules")["total"], 1)
+        self.assertEqual(search(schedule_kind="shared", flavor="hpc+ rf")["total"], 3)
+        self.assertEqual(search(schedule_kind="shared", flavor="' OR 1=1 --")["total"], 0)
+        empty = search_schedules(self.store, self.other, ScheduleQuery(schedule_kind="both"))
+        self.assertEqual((empty["total"], empty["sources"]), (0, []))
+        self.assertEqual(self.provider.calls, 0)
+
+    def test_schedule_pagination_version_replacement_and_failed_update(self):
+        from gsme_rag.retrieval.schedules import ScheduleQuery, search_schedules, ScheduleSnapshotChanged
+        first_source = self._schedule_fixture()
+        first = search_schedules(self.store, self.tenant, ScheduleQuery(schedule_kind="shared", limit=2))
+        second = search_schedules(self.store, self.tenant, ScheduleQuery(schedule_kind="shared", limit=2, offset=first["next_offset"], snapshot=first["snapshot"]))
+        ids = [r["record_id"] for r in first["results"] + second["results"]]
+        self.assertEqual(len(set(ids)), 4)
+        self.assertFalse(second["has_more"])
+        replacement = self._schedule_fixture(first_source["document_id"],
+            "40,LP,2027-01-01,2027-01-02,2027-01-03,2027-02-01\n")
+        with self.assertRaises(ScheduleSnapshotChanged):
+            search_schedules(self.store, self.tenant, ScheduleQuery(schedule_kind="shared", snapshot=first["snapshot"]))
+        current = search_schedules(self.store, self.tenant, ScheduleQuery(schedule_kind="shared"))
+        self.assertEqual(current["total"], 1)
+        self.assertEqual(str(current["results"][0]["version_id"]), replacement["version_id"])
+        source = Path(self.temp.name) / "shared_schedules.csv"
+        source.write_text("Tech (nm),Flavor,Trial,Final,Tapeout,Est. Ship\n28,LP,invalid,invalid,invalid,invalid\n", encoding="utf-8")
+        bad = self.store.submit(self.tenant, source, self.settings.data_dir, first_source["document_id"])
+        self.assertEqual(process_ingestion(self.store, self.settings, bad["job_id"])["state"], "failed")
+        self.assertEqual(search_schedules(self.store, self.tenant, ScheduleQuery(schedule_kind="shared"))["total"], 1)
+        catalog = self.store.schedule_catalog(self.tenant)
+        self.assertEqual(catalog["facets"], [dict(schedule_kind="shared", technology_nm=40, flavor="LP")])
+        self.assertEqual(self.store.schedule_catalog(self.other)["sources"], [])
+
+    def test_mixed_workbook_schedule_ingestion_keeps_physical_sheets(self):
+        from openpyxl import Workbook
+        from gsme_rag.retrieval.schedules import ScheduleQuery, search_schedules
+        book = Workbook()
+        book.active.title = "shared"
+        book.create_sheet("full")
+        for sheet in book:
+            sheet.append(["Tech (nm)", "Flavor", "Trial", "Final", "Tapeout", "Est. Ship"])
+            sheet.append([28, "LP", "2026-10-01", "2026-10-02", "2026-10-03", "2026-11-01"])
+        source = Path(self.temp.name) / "schedules.xlsx"
+        book.save(source)
+        submitted = self.store.submit(self.tenant, source, self.settings.data_dir)
+        self.assertEqual(process_ingestion(self.store, self.settings, submitted["job_id"])["schedule_rows"], 2)
+        result = search_schedules(self.store, self.tenant, ScheduleQuery(schedule_kind="both"))
+        self.assertEqual(result["total"], 2)
+        self.assertEqual({r["source_sheet"] for r in result["results"]}, {"full", "shared"})
+        self.assertEqual(len({r["record_id"] for r in result["results"]}), 2)
+        self.assertEqual({r["source_row_number"] for r in result["results"]}, {2})
+
     def test_invalid_source_reports_operation_without_content(self):
         source = Path(self.temp.name) / "invalid.docx"
         source.write_bytes(b"private test bytes, not a DOCX")
@@ -219,6 +313,28 @@ class StorageIntegrationTests(TestCase):
                                        self.settings, self.tenant)["indexed"], 0)
         self.assertEqual(self.provider.calls, 0)
 
+    def test_provider_cooldown_delays_durable_retry(self):
+        from gsme_rag.storage.providers import ProviderOperationError
+
+        first = self._approved_faq()
+        with self.store.connect() as db:
+            job = db.execute("SELECT j.id,j.point_id FROM index_jobs j JOIN evidence_chunks c ON c.id=j.chunk_id WHERE c.version_id=%s",
+                             (first["version_id"],)).fetchone()
+            db.execute("UPDATE index_jobs SET state='queued',attempt_count=0 WHERE id=%s", (job["id"],))
+        self.vectors.delete([str(job["point_id"])])
+        with patch.object(self.provider, "encode_tokens", side_effect=ProviderOperationError(
+                "Safe synthetic rate limit", retry_after_seconds=75)):
+            result = process_index(self.store, self.vectors, self.provider, self.settings,
+                                   self.tenant, first["version_id"])
+        self.assertEqual((result["failed"], result["retry_after_seconds"]), (1, 75))
+        with self.store.connect() as db:
+            saved = db.execute("SELECT state,next_attempt_at-updated_at >= interval '75 seconds' AS cooldown FROM index_jobs WHERE id=%s",
+                               (job["id"],)).fetchone()
+        self.assertTrue(saved["cooldown"])
+        self.assertEqual(saved["state"], "failed")
+        self.assertEqual(process_index(self.store, self.vectors, self.provider, self.settings,
+                                       self.tenant, first["version_id"])["indexed"], 0)
+
     def test_source_order_pagination_and_immutable_reviewed_evidence(self):
         from docx import Document
         import psycopg
@@ -236,6 +352,31 @@ class StorageIntegrationTests(TestCase):
         self.assertEqual([chunk["chunk_index"] for chunk in first["chunks"] + last["chunks"]], list(range(105)))
         self.assertEqual(first["total_chunks"], 105)
         self.assertIsNone(last["next_offset"])
+        from hashlib import sha256
+        artifact = Path(first["version"]["artifact_path"]).read_bytes()
+        self.assertEqual(sha256(artifact).hexdigest(), first["version"]["normalized_sha256"])
+        selected = [chunk["source_chunk_id"] for chunk in first["chunks"][:2]]
+        review_args = (self.tenant, submitted["version_id"])
+        for invalid in [selected + ["unavailable"], [selected[0], selected[0]]]:
+            with self.assertRaises(ValueError):
+                self.store.record_reviews(*review_args, invalid, "approved", "tester", "Checked source", True)
+        with self.assertRaisesRegex(ValueError, "Source verification"):
+            self.store.record_reviews(*review_args, selected, "approved", "tester", "Checked source", False)
+        with self.assertRaises(ValueError):
+            self.store.record_reviews(self.other, submitted["version_id"], selected,
+                                      "approved", "tester", "Checked source", True)
+        unchanged = self.store.inspect_version(self.tenant, submitted["version_id"])
+        self.assertTrue(all(c["evidence_status"] == "pending" for c in unchanged["chunks"]))
+        self.assertEqual(self.store.record_reviews(*review_args, selected, "approved", "tester", "Checked source", True), 2)
+        updated = self.store.inspect_version(self.tenant, submitted["version_id"])
+        self.assertEqual([c["evidence_status"] for c in updated["chunks"][:3]], ["approved", "approved", "pending"])
+        with self.store.connect() as db:
+            decisions = db.execute("SELECT count(*) AS n FROM review_decisions r JOIN evidence_chunks c ON c.id=r.chunk_id WHERE c.version_id=%s",
+                                   (submitted["version_id"],)).fetchone()["n"]
+        self.assertEqual(decisions, 2)
+        self.store.record_reviews(*review_args, selected, "rejected", "tester", "Source needs correction", False)
+        updated = self.store.inspect_version(self.tenant, submitted["version_id"])
+        self.assertEqual([c["evidence_status"] for c in updated["chunks"][:3]], ["rejected", "rejected", "pending"])
         with self.assertRaises(psycopg.errors.RaiseException):
             with self.store.connect() as db:
                 db.execute("UPDATE evidence_chunks SET evidence_text='changed' WHERE version_id=%s",
@@ -261,7 +402,7 @@ class StorageIntegrationTests(TestCase):
         self.store.publish(self.tenant, submitted["document_id"], submitted["version_id"],
                            self.provider.model_version, self.vectors.collection)
         result = process_index(self.store, self.vectors, self.provider,
-                               replace(self.settings, max_tokens=30), self.tenant, submitted["version_id"])
+                               replace(self.settings, max_tokens=64), self.tenant, submitted["version_id"])
         self.assertEqual((result["indexed"], result["failed"]), (1, 1), result)
         with self.store.connect() as db:
             bad = db.execute("SELECT retryable,last_error FROM index_jobs WHERE state='failed' AND chunk_id IN "

@@ -3,87 +3,111 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>GSME Muse · Documents and embeddings</title>
-  <link rel="stylesheet" href="/assets/console.css">
-  <script defer src="/assets/console.js"></script>
+  <title>GSME Muse · Evidence workspace</title>
+  <link rel="stylesheet" href="/assets/console.css?v=0.16.4">
+  <script defer src="/assets/evidence.js?v=0.16.4"></script>
+  <script defer src="/assets/console.js?v=0.16.4"></script>
 </head>
 <body>
-<h1>GSME Muse documents</h1>
-<p>Upload → parse → check source → approve → publish → embed → test evidence search.</p>
+<header class="app-header">
+  <div><span class="eyebrow">GSME MUSE</span><h1>Advanced administration</h1><p class="muted"><a href="/">Back to source search</a> · Technical controls and exception review.</p></div>
+  <div class="mode-picker"><label for="provider">Working mode</label><select id="provider"><option value="fake">Local demo — no external calls</option><option value="cohere">Cohere — real embeddings &amp; reranking</option></select></div>
+</header>
 <div id="message" role="status" aria-live="polite">Connect to get started.</div>
-<section>
-  <h2>Connect</h2>
+<details id="connection" class="connection" open>
+  <summary>Connection &amp; workspace <span id="connectionState">Not connected</span></summary>
   <div class="grid">
     <div><label for="token">Local access token from .env</label><input id="token" type="password" autocomplete="off"></div>
     <div><label for="tenant">Workspace (tenant)</label><input id="tenant" value="local-test"></div>
     <div><label for="reviewer">Reviewer name from .env</label><input id="reviewer" placeholder="For example HP"></div>
   </div>
-  <button id="connect">Check connection</button>
-  <p class="muted">The reviewer name must appear in GSME_AUTHORIZED_REVIEWERS. Restart the console after changing .env.</p>
-  <pre id="health"></pre>
-</section>
-<section>
-  <h2>1. Upload and parse</h2>
+  <button id="connect">Connect</button>
+  <details><summary>Connection details &amp; logs</summary><p class="muted">Use your local token from .env. A reviewer is only needed for manual exceptions. Restart after changing .env. Stage logs also appear in PowerShell and data/logs/console.log.</p><pre id="health"></pre>
+    <button id="showLogs" class="secondary">Recent operation logs</button><pre id="operationLogs"></pre></details>
+</details>
+<nav class="tabs" role="tablist" aria-label="Workspace screens">
+  <button id="tab-documents" role="tab" aria-selected="true" aria-controls="panel-documents" data-screen="documents">Documents</button>
+  <button id="tab-review" role="tab" aria-selected="false" aria-controls="panel-review" data-screen="review" tabindex="-1">Review &amp; index</button>
+  <button id="tab-search" role="tab" aria-selected="false" aria-controls="panel-search" data-screen="search" tabindex="-1">Ask sources</button>
+  <button id="tab-schedules" role="tab" aria-selected="false" aria-controls="panel-schedules" data-screen="schedules" tabindex="-1">Schedules</button>
+</nav>
+<main>
+<section id="panel-documents" role="tabpanel" aria-labelledby="tab-documents">
+  <h2>Your documents</h2>
+  <p class="muted">Upload a file and ingest it. Clean text is indexed automatically; only extraction problems are held aside. No review notes needed for ordinary text.</p>
   <div class="grid">
-    <div><label for="file">DOCX, PDF, CSV, or image</label><input id="file" type="file" accept=".docx,.pdf,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp"></div>
-    <div><label for="schedule">Schedule kind (schedule CSV only)</label><select id="schedule"><option value="">Detect from filename</option><option value="full">Full</option><option value="shared">Shared</option></select></div>
+    <div><label for="file">DOCX, PPTX, XLSX, PDF, CSV, or image</label><input id="file" type="file" accept=".docx,.pptx,.xlsx,.pdf,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp"></div>
+    <div><label for="schedule">Schedule CSV type (other files: leave automatic)</label><select id="schedule"><option value="">Automatic</option><option value="full">Full</option><option value="shared">Shared</option></select></div>
   </div>
-  <label for="existingDoc">Replace an existing document (optional document ID)</label><input id="existingDoc">
-  <button id="submit">Upload</button><button id="ingest">Parse uploaded job</button><button id="jobStatus">Check job</button><button id="retry">Retry failed parse</button>
-  <p class="muted">Parsing stores the original, normalized text, warnings, and pending chunks locally. Large PDFs may take several minutes.</p>
-  <button id="versions">Refresh document list</button>
-  <label for="versionPicker">Choose a version</label><select id="versionPicker"><option value="">Upload or refresh documents</option></select>
-  <details><summary>Document and job IDs</summary><div class="grid">
+  <details><summary>Replace a document / parsing tools</summary><label for="existingDoc">Existing document ID (optional)</label><input id="existingDoc">
+    <label><input id="parseOnly" type="checkbox"> Parse only (advanced manual-review workflow)</label>
+    <button id="ingest" class="secondary">Resume parse</button><button id="jobStatus" class="secondary">Check job</button><button id="retry" class="secondary">Retry failed parse</button></details>
+  <label id="uploadPermission"><input id="uploadExternal" type="checkbox"> Permit this document's accepted text to be sent to Cohere for embedding</label>
+  <button id="submit">Ingest document</button><p id="ingestSummary" role="status"></p>
+  <hr><div class="section-heading"><h3>Open an existing document</h3><button id="versions" class="secondary">Refresh</button></div>
+  <label for="versionPicker">Document version</label><select id="versionPicker"><option value="">Connect to load documents</option></select>
+  <details><summary>Advanced: document IDs &amp; job response</summary><div class="grid">
     <div><label for="job">Job ID</label><input id="job"></div><div><label for="version">Version ID</label><input id="version"></div><div><label for="document">Document ID</label><input id="document"></div>
-  </div></details><pre id="jobs"></pre>
+  </div><pre id="jobs"></pre></details>
 </section>
-<section>
-  <h2>2. Compare and review</h2>
-  <p>Check each chunk against its source. OCR, inferred tables, charts and formulas may need correction in the source before approval.</p>
-  <button id="inspect">Load chunks and status</button><button id="source">Download original</button><button id="markdown">View normalized Markdown</button><button id="manifest">View warnings and diagnostics</button>
-  <pre id="versionInfo"></pre><pre id="artifact"></pre>
+<section id="panel-review" role="tabpanel" aria-labelledby="tab-review" hidden>
+  <h2>Extraction issues &amp; document details</h2>
+  <p id="reviewSummary" class="muted">Choose a document on the Documents screen first.</p>
+  <p class="muted">Ordinary clean text needs no manual approval. Only flagged extraction issues need attention; you can leave them out and search the rest. Missing “here” links need the original URL, not a guess.</p>
+  <button id="source" class="secondary">Open original</button><button id="inspect" class="secondary">Refresh review</button>
+  <details><summary>Source text, warnings &amp; technical details</summary>
+    <button id="markdown" class="secondary">Normalized Markdown</button><button id="manifest" class="secondary">Warnings &amp; diagnostics</button>
+    <pre id="versionInfo"></pre><pre id="artifact"></pre>
+  </details>
   <button id="previous">Previous chunks</button><span id="pageInfo"></span><button id="next">Next chunks</button>
+  <details id="batchReview"><summary>Review several checked chunks together</summary>
+    <p class="muted">Select chunks on this screen after comparing them with the original. One note is recorded for each selected chunk. Pending chunks can stay pending; they are not searchable.</p>
+    <button id="selectPending" class="secondary">Select displayed pending chunks</button><button id="clearSelection" class="secondary">Clear selection</button>
+    <p class="muted">The selection shortcut skips missing-link answers. It does not verify tables, formulas or OCR for you.</p>
+    <p id="selectionInfo">0 selected</p>
+    <label for="batchNote">Shared review note: what source pages and records did you check?</label><textarea id="batchNote" rows="2"></textarea>
+    <label><input id="batchVerified" type="checkbox"> I checked every selected chunk against the original source</label>
+    <button id="approveSelected">Approve selected</button><button id="rejectSelected" class="secondary">Reject selected</button>
+  </details>
   <div id="chunks"></div>
+  <hr><h3>Make approved chunks searchable</h3>
+  <p class="muted">This publishes the selected version and embeds approved chunks only. It does not approve unchecked content.</p>
+  <label id="indexingPermission"><input id="external" type="checkbox"> Send this version's approved text to Cohere</label>
+  <button id="ingestExisting">Ingest clean text (no review notes)</button>
+  <button id="makeSearchable">Make reviewed exceptions searchable</button><p id="indexSummary" class="muted"></p>
+  <details id="indexDetails"><summary>Advanced: index status &amp; maintenance</summary>
+    <button id="publish" class="secondary">Publish / retry failed jobs</button><button id="index" class="secondary">Process one batch</button><button id="reconcile" class="secondary">Clean stale vectors</button>
+    <button id="repair" class="secondary">Find missing vectors</button><pre id="indexInfo"></pre><pre id="embeddingInfo"></pre>
+  </details>
 </section>
-<section>
-  <h2>3. Publish and embed approved chunks</h2>
-  <label for="provider">Embedding provider (also used for previews and search)</label>
-  <select id="provider"><option value="fake">Fake vectors — local workflow test</option><option value="cohere">Cohere — real semantic embeddings</option></select>
-  <p>Publish selects the current document version and queues its approved chunks. Index processes one batch. A result of zero means no jobs were due; check the job states for failures or retry delays.</p>
-  <label><input id="external" type="checkbox"> Send this version's approved text to Cohere</label>
-  <button id="publish">Publish approved version / retry failed index jobs</button><button id="index">Index one batch</button><button id="reconcile">Clean stale vectors</button>
-  <button id="repair">Check for missing stored vectors</button>
-  <pre id="indexInfo"></pre><pre id="embeddingInfo"></pre>
-</section>
-<section>
-  <h2>4. Retrieval with mandatory reranking</h2>
-  <p>This returns evidence, not an AI-written answer. Fake embeddings/reranking test plumbing only. Use Cohere for real relevance assessment.</p>
+<section id="panel-search" role="tabpanel" aria-labelledby="tab-search" hidden>
+  <h2>Ask your sources</h2>
+  <p class="muted">Find approved evidence with mandatory reranking. This is not an AI-written answer. Local demo mode tests the workflow only.</p>
   <label for="question">Question about an approved source</label><input id="question">
-  <div class="grid">
+  <details><summary>Search filters &amp; advanced options</summary><div class="grid">
     <div><label for="retrievalStrategy">Candidate search</label><select id="retrievalStrategy"><option value="hybrid">Hybrid: semantic + keyword (RRF)</option><option value="dense">Semantic only (still reranked)</option></select></div>
     <div><label for="candidateCount">Candidate passages</label><input id="candidateCount" type="number" min="1" max="100" value="30"></div>
     <div><label for="topK">Final results</label><input id="topK" type="number" min="1" max="20" value="5"></div>
     <div><label for="retrievalDocument">Document ID filter (optional)</label><input id="retrievalDocument"></div>
     <div><label for="retrievalCategory">Exact category (optional)</label><input id="retrievalCategory"></div>
     <div><label for="retrievalSource">Exact source filename (optional)</label><input id="retrievalSource"></div>
-  </div>
-  <label><input id="retrievalExternal" type="checkbox"> Permit this question and approved candidate passages to be sent to Cohere</label>
-  <button id="retrieve">Retrieve and rerank</button>
-  <p class="muted">Ranking scores are not factual confidence. No default answerability threshold has been calibrated.</p>
-  <pre id="retrievalInfo"></pre><div id="rankingComparison"></div><div id="retrievalResults"></div>
-  <details><summary>Before / after rankings and complete response</summary><pre id="retrievalTrace"></pre></details>
+  </div></details>
+  <label id="retrievalPermission"><input id="retrievalExternal" type="checkbox"> Permit this question and approved candidate passages to be sent to Cohere</label>
+  <button id="retrieve">Search approved sources</button>
+  <p id="searchSummary" role="status"></p><div id="retrievalResults"></div>
+  <details><summary>How results were ranked / diagnostics</summary><p class="muted">Scores are relevance, not factual confidence. No answerability threshold has been calibrated.</p><pre id="retrievalInfo"></pre><div id="rankingComparison"></div><pre id="retrievalTrace"></pre></details>
   <details><summary>Diagnostic baseline without reranking (not the retrieval pipeline)</summary>
     <button id="search">Run semantic baseline only</button><pre id="results"></pre>
   </details>
 </section>
-<section>
-  <h2>Exact schedule search</h2>
+<section id="panel-schedules" role="tabpanel" aria-labelledby="tab-schedules" hidden>
+  <h2>Find schedule rows</h2>
   <p>Validated schedule CSVs become typed rows automatically. Technology, flavor, and date filters use those rows.</p>
   <div class="grid"><div><label for="kind">Kind</label><select id="kind"><option value="full">Full</option><option value="shared">Shared</option></select></div>
   <div><label for="technology">Technology (nm, optional)</label><input id="technology" type="number" min="0"></div>
   <div><label for="flavor">Flavor (optional)</label><input id="flavor"></div>
   <div><label for="tapeout">Tapeout on or after (optional)</label><input id="tapeout" type="date"></div></div>
   <button id="schedules">Find schedule rows</button><pre id="scheduleResults"></pre>
-</section>
+</section></main>
 <p class="muted">Local administrator console · <a href="/docs">FastAPI reference</a> · Source approval and index state are stored separately.</p>
 </body></html>
