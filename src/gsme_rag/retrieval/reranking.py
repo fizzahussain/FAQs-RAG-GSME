@@ -108,5 +108,6 @@ class CohereReranker:
             emit("rerank.provider.failed", error_type=type(error).__name__, status=status if isinstance(status, int) else None,
                  model=self.model_version)
             reason = "rate limited; retry later" if status == 429 else "check rerank-model access, API key and network"
-            raise ProviderOperationError(f"Cohere reranking failed ({'HTTP ' + str(status) if isinstance(status, int) else 'no HTTP status'}); {reason}") from None
+            label = "HTTP " + str(status) if isinstance(status, int) else "no HTTP status; " + type(error).__name__
+            raise ProviderOperationError(f"Cohere reranking failed ({label}); {reason}") from None
         return validate_ranking(ranked, len(documents))

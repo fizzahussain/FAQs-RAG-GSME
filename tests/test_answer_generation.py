@@ -106,7 +106,8 @@ class AnswerTests(TestCase):
 
     def test_unparseable_or_truncated_answer_does_not_trigger_model_hopping(self):
         primary, fallback = provider("cohere"), provider("ollama")
-        for invalid in ["not JSON", '{"status":']:
+        for invalid in ["not JSON", '{"status":',
+                        'Unrequested analysis must not be exposed. {"status":"insufficient_evidence","claims":[]}']:
             primary.generate.return_value = invalid
             result = generate_answer("Who?", report(), lambda _: True, primary=primary, fallback=fallback)
             self.assertEqual(result["status"], "answer_validation_failed")
@@ -215,6 +216,16 @@ class AnswerTests(TestCase):
             for keyword in ["minLength", "maxLength", "minItems", "maxItems", "$ref"]:
                 self.assertNotIn(keyword, encoded)
             self.assertNotIn("documents", client.chat.call_args.kwargs)
+            self.assertEqual(client.chat.call_args.kwargs["thinking"], {"type": "enabled", "token_budget": 256})
+            self.assertEqual(client.chat.call_args.kwargs["max_tokens"], 1280)
+            self.assertEqual(client.chat.call_args.kwargs["request_options"]["max_retries"], 0)
+            CommandAnswers(AnswerSettings(command_model="command-a-03-2025")).generate("Who?", [])
+            self.assertNotIn("thinking", client.chat.call_args.kwargs)
+            self.assertEqual(client.chat.call_args.kwargs["max_tokens"], 1024)
+            client.chat.return_value.finish_reason = "MAX_TOKENS"
+            with self.assertRaisesRegex(InvalidAnswer, "incomplete"):
+                CommandAnswers(AnswerSettings()).generate("Who?", [])
+            client.chat.return_value.finish_reason = "COMPLETE"
             for error in [httpx.ConnectError("private payload must not escape"),
                           type("Error", (Exception,), {"status_code": 429})("private key")]:
                 client.chat.side_effect = error

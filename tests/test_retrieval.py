@@ -260,6 +260,7 @@ class RerankProviderTests(TestCase):
                 CohereReranker().rank("Question", ["private passage"])
             self.assertNotIn("secret-key", str(captured.exception))
             self.assertNotIn("private passage", str(captured.exception))
+            self.assertIn("no HTTP status; RuntimeError", str(captured.exception))
 
 
 class RetrievalApiTests(TestCase):

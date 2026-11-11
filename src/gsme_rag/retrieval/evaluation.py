@@ -6,6 +6,7 @@ from pathlib import Path
 import statistics
 
 from .service import RetrievalOptions, retrieve
+from .benchmarking import ranking_trace
 
 
 def draft_cases(store, tenant_id: str, version_id: str) -> dict:
@@ -79,6 +80,7 @@ def evaluate_retrieval(store, vectors, provider, reranker, settings, path: Path,
         for item in [*report["initial_candidates"], *context]:
             invalid += not store.is_source_current_approved(case["tenant_id"], item["version_id"], item["chunk_id"])
         rows.append({"question": case["question"], "expect_no_answer": not bool(expected),
+            "ranking_trace": ranking_trace(report, expected),
             "candidate_recall": recall(before), "before_recall_at_5": recall(before[:5]),
             "after_recall_at_5": recall(after[:5]), "after_recall_at_10": recall(after[:10]),
             "context_recall": recall(context_ids), "before_mrr_at_5": reciprocal(before) if expected else None,
@@ -92,6 +94,11 @@ def evaluate_retrieval(store, vectors, provider, reranker, settings, path: Path,
                 "context_recall", "before_mrr_at_5", "after_mrr_at_5", "after_ndcg_at_5"):
         values = [row[key] for row in rows if row[key] is not None]
         metrics[key] = statistics.mean(values) if values else None
+    for stage in ("candidate", "reranked", "final"):
+        for cutoff in (1, 3, 5, 10):
+            values = [row["ranking_trace"][stage][f"hit_at_{cutoff}"] for row in rows
+                      if row["ranking_trace"][stage][f"hit_at_{cutoff}"] is not None]
+            metrics[f"{stage}_hit_at_{cutoff}"] = statistics.mean(values) if values else None
     times = sorted(row["timings_ms"]["total"] for row in rows)
     return {"source": fixture["source"], "synthetic_models": not provider.external,
         "strategy": strategy, "reranker_model": reranker.model_version, "questions": len(rows),

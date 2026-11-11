@@ -17,3 +17,17 @@ class AnswerEvaluationTests(TestCase):
         report = {"source": "synthetic", "counts": {}, "cases": [{"kind": "no_answer", "answer": {"status": "provider_unavailable"}, "retrieval": {}}]}
         self.assertEqual(summarize(report)["negative_abstentions"], 0)
         self.assertEqual(summarize(report)["failure_categories"], {"provider_unavailable": 1})
+
+    def test_claim_groundedness_requires_bound_human_judgments_and_status_changes_invalidate(self):
+        answer = {"status": "answered", "text": "Synthetic", "claims": [{"text": "A"}, {"text": "B"}]}
+        report = {"source": "synthetic", "counts": {}, "cases": [{"kind": "answer", "answer": answer, "retrieval": {}}]}
+        self.assertIsNone(summarize(report)["unsupported_claim_rate"])
+        judgment = {"answer_id": answer_id(answer), "verdict": "unsupported", "reviewer": "synthetic source reviewer",
+            "rationale": "Compared original", "claim_reviews": [
+                {"claim_index": 0, "verdict": "supported", "rationale": "Matches original"},
+                {"claim_index": 1, "verdict": "contradicted", "rationale": "Original states the opposite"}]}
+        result = summarize(report, [judgment])
+        self.assertEqual(result["human_reviewed_claims"], 2)
+        self.assertEqual(result["contradicted_claim_rate"], .5)
+        answer["status"] = "insufficient_evidence"
+        self.assertEqual(summarize(report, [judgment])["human_reviewed_claims"], 0)

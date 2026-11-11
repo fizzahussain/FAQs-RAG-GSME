@@ -1,0 +1,26 @@
+# 0.19.0 — hosted access and evaluation diagnostics
+
+Package version advances to 0.19.0; parser, chunker and retrieval identities are unchanged. No re-embedding is required solely for this increment. New migrations 006/007 are required for hosted access; no source is automatically published.
+
+- Separate port-8020 chatbot with public, explicitly published FAQs and Google Workspace owner-only private uploads. Local operator console remains separate.
+- Server-side fixed workspace and owner policies apply before retrieval/reranking, to source downloads and schedule queries, and after generation. Revocation during a request removes stale evidence and answers.
+- Explicit public schedule records can be shared without exposing the original spreadsheet. Public version replacement requires republication.
+- Shared request budgets, bounded upload/chat concurrency, strict origins, safe text rendering and logout/in-flight response isolation. Provider clients close on partial startup failure.
+- Candidate/rerank/final rank traces, top-k diagnostics, grouped threshold calibration and optional human claim-level groundedness judgments. No arbitrary score cutoff is enabled.
+- Local draft FAQ/manual challenge generator and synthetic API/browser regressions. Draft probes are not human-approved quality results.
+
+See [deployment boundaries](HOSTED_DEPLOYMENT.md), [evaluation methodology](EVALUATION_PLAN.md) and [approved live pilot results](QUALITY_PILOT_0.19.0.md). Real Google Workspace sign-in, production hosting and independently reviewed post-fix answer-quality acceptance remain separate release gates. In-process background processing with owner resume is not a durable external worker. No live company-content evaluation or document publication is authorized merely by installing this release.
+
+The approved pilot demonstrated a Command reasoning/output-budget defect. Known reasoning-capable Command models now reserve 256 thinking tokens plus 1,024 answer tokens; an attempted thinking-disabled profile produced non-JSON prose and was not retained as the final setting. Source qualifiers are explicitly required, and non-JSON/incomplete output remains blocked. Rerank transport failures now expose a safe exception-class label, not source content or credentials. Original failed results remain available separately from the three successful focused retests.
+
+## Verification record
+
+- Full suite with isolated PostgreSQL/Qdrant, original manual and native PDF backend: **301 tests, 300 passed, one failure, zero skips**, 2179.307 seconds. The storage FAQ integration test failed at `collection_check` with `ResponseHandlingException`; no embedding call occurred in that failed batch. This transport-stage failure is not suppressed or treated as successful indexing. It also means this run cannot be reported as fully green.
+- Separate serial storage integration rerun: **19/19 passed**, 86.511 seconds, including the previously failed case. This supports an intermittent Qdrant transport issue; it does not establish its underlying infrastructure cause or replace a clean full-suite run. Ranking/threshold unit checks also passed **3/3**.
+- Hosted API tests passed in that run, including guest/owner isolation, source and reranker-input filtering, unauthorized uploads, and revocation during reranking/generation. Google claims verification uses mocked SDK responses, not real company sign-in.
+- Headless Edge checks passed guest FAQ visibility, owner-only documents, source rendering, logout and late-response isolation, and mobile layout. No browser errors or unexpected network requests; Google sign-in mocked and zero external model calls. Local artifacts: `validation/hosted-ui/`.
+- Draft local bank: **70 cases plus 246 manual lexical coverage probes**. Not human-approved and not a new live quality benchmark.
+- Editable 0.19.0 installation and wheel built successfully; all **77 packaged files** match source, including hosted assets and migrations. Private data/validation artifacts absent. Dependency and whitespace checks passed (Git reports only line-ending conversion notices).
+- Final serial full suite after the generation/diagnostic fixes: **308 tests passed**, zero failures/errors/skips, **190.590 seconds**. Isolated PostgreSQL/Qdrant, original-manual checks and native PDF backend were enabled. Provider calls in the suite are mocked/fake; the separately approved real calls are accounted below.
+- Approved live pilot plus three answer-only checks: **125/240 HTTP attempts**, **48/48 searches attempted (45 successful)** and **27/27 authorized Command calls**. Both dense/hybrid had pinned expected passages in top 5 on **12/12 positives**. Original answer errors remain recorded; all three focused checks passed. See the [full methodological caveats, transport failures and source-policy ambiguity](QUALITY_PILOT_0.19.0.md).
+- Final serial headless Edge rerun passed guest FAQ visibility, owner-only documents, source rendering, logout/in-flight response isolation and mobile layout. Zero browser errors/unexpected network requests, zero live model calls; Google identity remains mocked. Artifacts: `validation/hosted-ui-0.19.0-final/`. The final wheel was rebuilt after the provider fixes and source matching rechecked.

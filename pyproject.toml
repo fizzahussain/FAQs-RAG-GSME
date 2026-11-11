@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gsme-rag"
-version = "0.18.1"
+version = "0.19.0"
 description = "Inspectable GSME RAG parsing, reviewed storage and evidence retrieval"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,18 +25,21 @@ dependencies = [
 pdf = ["docling==2.145.0", "docling-ibm-models==4.0.4", "httpx[socks]>=0.27,<1"]
 test = ["httpx>=0.28,<1", "httpx2>=2.16,<3"]
 storage = ["psycopg[binary]>=3.2,<4", "qdrant-client>=1.20,<1.21", "cohere>=5.20,<6", "python-dotenv>=1,<2", "httpx[socks]>=0.27"]
+hosted = ["google-auth>=2.40,<3", "requests>=2.32,<3"]
 
 [project.scripts]
 gsme-rag = "gsme_rag.cli:main"
 gsme-rag-api = "gsme_rag.api.run:main"
 gsme-rag-storage = "gsme_rag.storage.cli:main"
 gsme-rag-admin = "gsme_rag.storage.admin:main"
+gsme-rag-hosted = "gsme_rag.hosted.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 "gsme_rag.storage" = ["migrations/*.sql", "web/*"]
+"gsme_rag.hosted" = ["web/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

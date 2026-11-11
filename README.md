@@ -1,6 +1,6 @@
 # GSME Muse document pipeline
 
-Version 0.18.1 prepares and retrieves GSME/Muse FAQ and technical-document evidence, with exact Full/Shared tapeout schedule search. Clean text is accepted automatically; uncertain extraction stays held. PostgreSQL/Qdrant support versioned evidence and incremental vector reuse. Hybrid retrieval and mandatory reranking feed Command-first/Ollama-fallback cited answers. Optional strategies include local expansion/multi-query, semantic boundaries and exact extractive compression. [Current provider/resource audit](docs/CHANGES_0.18.1.md), [schedule verification](docs/CHANGES_0.18.0.md), [answer evaluation](docs/CHANGES_0.17.0.md), and [submission/demo guide](docs/SUBMISSION_GUIDE.md).
+Version 0.19.0 adds a separate company chatbot: explicitly published FAQs are public without sign-in; private uploads require Google Workspace sign-in and remain owner-only. Nothing becomes public automatically. Hybrid retrieval and mandatory reranking feed Command-first/Ollama-fallback cited answers; tapeout schedules use exact structured search. Clean text is accepted automatically; uncertain extraction stays held. See [hosted setup and limitations](docs/HOSTED_DEPLOYMENT.md), [release changes](docs/CHANGES_0.19.0.md), [evaluation plan](docs/EVALUATION_PLAN.md), and the [submission/demo guide](docs/SUBMISSION_GUIDE.md).
 
 | Input | Processing |
 | --- | --- |
@@ -20,7 +20,7 @@ Use PowerShell in this folder. Keep your existing private `.env` when updating a
 
 ```powershell
 py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[storage,test]"
+.\.venv\Scripts\python.exe -m pip install -e ".[storage,test,hosted]"
 ```
 
 For a new installation, copy `.env.example` to `.env` and fill in the database password, the matching URL-encoded password in `GSME_DATABASE_URL`, a reviewer name, and a random review token of at least 20 characters. Start Docker Desktop, then run each command separately:
@@ -35,7 +35,7 @@ Open **http://127.0.0.1:8010/**. Connect with your local token and workspace, ch
 
 The main page is now a question box, cited source matches and a collapsible Documents panel. Engineering controls and exception review are separate at `/admin`. Search reranks up to 30 eligible passages and shows up to 5 results; the actual count is visible. Real reranking additionally requires `GSME_RERANK_CONTENT_APPROVED=yes` and the interface's send-content confirmation. [Interface and source-backed checks](docs/CHANGES_0.16.4.md). [Retrieval setup and evaluation](docs/RETRIEVAL.md).
 
-The smaller parsing-only demo remains available with `python -m gsme_rag.api.run` at `http://127.0.0.1:8000/`. It is the only app deployed by `Dockerfile`/`render.yaml`. The local operator console binds to loopback and has its own authenticated API at `/docs`.
+The company chatbot starts with `python -m gsme_rag.hosted.app` at `http://127.0.0.1:8020/`; configure its fixed workspace, public source policies and sign-in first. The smaller parsing-only demo remains available with `python -m gsme_rag.api.run` at `http://127.0.0.1:8000/`. It is the only app deployed by `Dockerfile`/`render.yaml`. The local operator console on 8010 must remain private; it has its own authenticated API at `/docs`.
 
 ## OCR and complex PDFs
 

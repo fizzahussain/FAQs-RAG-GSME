@@ -926,7 +926,7 @@ class EvidenceStore:
         with self.connect() as db:
             return db.execute(query, values).fetchall()
 
-    def schedule_search(self, tenant_id, query, document_id=None):
+    def schedule_search(self, tenant_id, query, document_id=None, *, allowed_documents=None):
         """Count and page the same current-version snapshot with exact SQL.
 
         Only a validated milestone identifier enters SQL; all user values are
@@ -943,6 +943,9 @@ class EvidenceStore:
             WHERE r.tenant_id=%s AND d.tenant_id=%s AND d.current_version_id=r.version_id
               AND v.document_class='schedule' AND v.state IN ('approved','indexing','indexed')"""
         values = [tenant_id, tenant_id]
+        if allowed_documents is not None:
+            scope += " AND r.document_id=ANY(%s::uuid[])"
+            values.append(allowed_documents)
         if document_id:
             scope += " AND r.document_id=%s::uuid"
             values.append(document_id)
