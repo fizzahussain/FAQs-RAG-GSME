@@ -15,3 +15,5 @@ validation/
 data/
 _deps/
 GSME_RAG_Storage_*.zip
+GSME_Positive_Tests.pdf
+GSME_Negative_Tests.pdf

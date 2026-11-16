@@ -2,7 +2,7 @@ import re
 
 
 CONTROL_MARKER = re.compile(
-    r"<!--\s*(?:page:\s*\d+|review-required:\s*[-\w]+|review-end|section-break|"
+    r"<!--\s*(?:page:\s*\d+|page-context:\s*isolated|review-required:\s*[-\w]+|review-end|section-break|"
     r"table:\s*\d+;\s*first_data_row:\s*\d+)\s*-->"
 )
 

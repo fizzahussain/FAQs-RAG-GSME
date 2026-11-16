@@ -15,7 +15,10 @@ LOGGER = logging.getLogger("gsme_rag")
 # An allowlist prevents accidental request bodies, tokens or file paths in logs.
 FIELDS = {"request_id", "route", "method", "status", "elapsed_ms", "error_type", "stage",
           "job_id", "version_id", "backend", "model", "chunks", "warnings", "accepted", "held",
-          "indexed", "failed", "candidates", "results", "missing_settings", "version"}
+          "indexed", "failed", "candidates", "results", "missing_settings", "version",
+          "question_hash", "query_chars", "document_id", "eligible", "hits", "ranked_chunks",
+          "retrieval_status", "answer_status", "cited_sources", "fallback_used", "warning_codes",
+          "failure_reason", "context_chars", "collection", "min_rerank_score"}
 
 
 def emit(event: str, *, level=logging.INFO, **fields):
@@ -50,7 +53,7 @@ def configure_console_logging(data_dir: Path):
             handler.close()
     directory = data_dir / "logs"
     directory.mkdir(parents=True, exist_ok=True)
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S%z")
     for handler in (logging.StreamHandler(), RotatingFileHandler(
             directory / "console.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")):
         handler._gsme_operator_handler = True

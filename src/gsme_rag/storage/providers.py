@@ -114,6 +114,8 @@ class CohereEmbeddings:
     @staticmethod
     def _safe_error(operation: str, error: Exception) -> str:
         status = getattr(error, "status_code", None)
+        emit("embedding.provider.failed", backend="cohere", stage=operation,
+             status=status if isinstance(status, int) else None, error_type=type(error).__name__)
         if status in (401, 403):
             advice = "check API key and model access"
         elif status == 404:

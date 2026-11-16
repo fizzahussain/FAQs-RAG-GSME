@@ -21,6 +21,33 @@ MANUAL = Path(os.getenv("GSME_TEST_MANUAL_PDF", "validation/source/MFG-GSME-0002
 
 
 class EvidenceFidelityTests(unittest.TestCase):
+    def test_later_equality_bullet_does_not_hold_selectable_definition(self):
+        from gsme_rag.storage.postgres import _page_warning_codes
+        from gsme_rag.storage.acceptance import clean_text_eligible
+        with fitz.open() as pdf:
+            page = pdf.new_page(width=960,height=540)
+            page.insert_text((70,70), "What is a Technology Node?", fontsize=28)
+            page.insert_textbox((70,120,850,220),
+                "A technology node refers to the smallest physical dimensions that can be manufactured on a chip.\n"
+                "It is often measured in nanometers.\n"
+                "Smaller node = more transistors = better performance and efficiency.", fontsize=14)
+            diagnostics, warnings, pages = inspect_pdf_fidelity(pdf, max_ocr_regions=0)
+            self.assertEqual(len(diagnostics), 1)
+            self.assertTrue(diagnostics[0].original_text.startswith("Smaller node"))
+            markdown, _ = _native_markdown(pdf, _extract_lines(pdf), pages, diagnostics)
+            for warning in warnings:
+                if warning.code == "text_fidelity_needs_review":
+                    warning.code = "text_fidelity_region_needs_review"
+            parsed = ParsedDocument("slide.pdf","pdf","native",markdown,warnings)
+            chunks = chunk_markdown(markdown, "slide.pdf", content_route="paper").chunks
+            definition = next(c for c in chunks if "A technology node refers" in c.text)
+            self.assertFalse(definition.review_required)
+            self.assertTrue(clean_text_eligible(definition.text, definition.chunk_type, definition.review_required,
+                warning_codes=_page_warning_codes(parsed,definition)))
+            chain = next(c for c in chunks if "Smaller node =" in c.text)
+            self.assertTrue(chain.review_required)
+            self.assertFalse(clean_text_eligible(chain.text,chain.chunk_type,chain.review_required))
+
     def test_broken_font_and_incomplete_formula_detection(self):
         self.assertIn("Unicode", _reason("Dose \ufffd 3"))
         self.assertIn("Unicode", _reason("A \ue123 B"))

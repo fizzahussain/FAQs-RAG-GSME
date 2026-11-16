@@ -20,6 +20,37 @@ from gsme_rag.parsing.schedules import resolve_schedule_kind
 
 
 class PdfUpgradeTests(unittest.TestCase):
+    def test_regular_weight_slide_title_and_page_context_do_not_leak(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "slides.pdf"
+            with pymupdf.open() as pdf:
+                for title, body in [("What is UBM?", "A metal stack layer."),
+                                    ("Process Control & Monitoring", "PCM measures electrical parameters."),
+                                    (None, "Independent page without a title.")]:
+                    page = pdf.new_page(width=960, height=540)
+                    if title:
+                        page.insert_text((70,80), title, fontsize=28)
+                    page.insert_text((70,150), body, fontsize=14)
+                pdf.save(path)
+            result = parse_to_markdown(path, pdf_backend="native")
+            chunks = chunk_markdown(result.markdown, path.name, content_route="paper").chunks
+            pcm = next(c for c in chunks if "PCM measures" in c.text)
+            self.assertEqual(pcm.heading_path, ["Process Control & Monitoring"])
+            self.assertNotIn("UBM", pcm.text)
+            independent = next(c for c in chunks if "Independent page" in c.text)
+            self.assertEqual(independent.heading_path, [])
+
+    def test_slide_columns_keep_source_blocks_together(self):
+        from gsme_rag.parsing.pdf import _extract_lines, _native_markdown
+        with pymupdf.open() as pdf:
+            page = pdf.new_page(width=960, height=540)
+            page.insert_textbox((650,150,930,240), "IC Packaging\nDie attached to substrate.\nEncapsulation and marking.", fontsize=14)
+            page.insert_textbox((300,150,580,240), "Package-Level Testing\nBurn-in and final test.", fontsize=14)
+            page.insert_textbox((30,150,270,240), "Packing and Labeling\nLabel per customer spec.", fontsize=14)
+            markdown, _ = _native_markdown(pdf, _extract_lines(pdf))
+            self.assertLess(markdown.index("Encapsulation"), markdown.index("Package-Level Testing"))
+            self.assertLess(markdown.index("Burn-in"), markdown.index("Packing and Labeling"))
+
     def test_numbered_two_column_process_is_not_misclassified_as_faq(self):
         lines = [
             _Line(1, f"{number} Process step", 30, number * 30, 120, number * 30 + 10, 12, 1)

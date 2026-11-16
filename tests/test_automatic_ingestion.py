@@ -15,10 +15,21 @@ from qdrant_client import QdrantClient
 from gsme_rag.storage.acceptance import clean_text_eligible, CLEAN_TEXT_POLICY
 from gsme_rag.storage.admin import create_admin_app
 from gsme_rag.storage.config import Settings
-from gsme_rag.storage.postgres import EvidenceStore
+from gsme_rag.storage.postgres import EvidenceStore, _chunk_warning_codes, _page_warning_codes
 
 
 class AutomaticAcceptanceTests(TestCase):
+    def test_region_warnings_do_not_block_unrelated_clean_prose(self):
+        codes = ["ocr_needs_review", "table_needs_review", "visual_evidence_missing",
+                 "formula_table_needs_review", "figure_needs_review"]
+        self.assertEqual(_chunk_warning_codes(codes, "section", False), [])
+        self.assertTrue(clean_text_eligible("Selectable source paragraph.", "section", False,
+            warning_codes=_chunk_warning_codes(codes, "section", False)))
+        for kind, review in [("section", True), ("table_row", True), ("table_row", False), ("visual_gap", True)]:
+            self.assertEqual(_chunk_warning_codes(codes, kind, review), sorted(codes))
+        for code in ["text_fidelity_needs_review", "vector_content_needs_review", "link_target_missing", "unknown_warning"]:
+            self.assertEqual(_chunk_warning_codes(codes + [code], "section", False), [code])
+
     def test_only_clean_text_is_automatic(self):
         self.assertTrue(clean_text_eligible("Normal source prose.", "section", False))
         self.assertTrue(clean_text_eligible("Find [here](<https://example.invalid/?lot=A17>).", "question_answer", False))
@@ -79,7 +90,12 @@ class AutomaticIngestionIntegrationTests(TestCase):
                     with source.open("rb") as file:
                         submitted = client.post("/api/submit", headers=headers, data={"tenant": tenant},
                                                 files={"file": (source.name, file)}).json()
-                    client.post("/api/ingest", headers=headers, json={"tenant": tenant, "job_id": submitted["job_id"]})
+                    # A legacy parser attached an image/table warning to nearby
+                    # prose. Preserve raw warnings, but do not trust OCR/formulas.
+                    with patch("gsme_rag.storage.postgres._page_warning_codes", side_effect=lambda parsed, chunk:
+                               sorted(set(_page_warning_codes(parsed, chunk)) |
+                                      {"ocr_needs_review", "visual_evidence_missing", "table_needs_review"})):
+                        client.post("/api/ingest", headers=headers, json={"tenant": tenant, "job_id": submitted["job_id"]})
                     body = {"tenant": tenant, "version_id": submitted["version_id"],
                             "document_id": submitted["document_id"], "provider": "fake"}
                     self.assertEqual(client.post("/api/ingest-ready", json=body).status_code, 401)
@@ -97,6 +113,7 @@ class AutomaticIngestionIntegrationTests(TestCase):
                     inspection = store.inspect_version(tenant, submitted["version_id"])
                     self.assertEqual([c["evidence_status"] for c in inspection["chunks"]], ["approved", "pending", "pending"])
                     clean = inspection["chunks"][0]
+                    self.assertIn("visual_evidence_missing", clean["raw_warning_codes"])
                     self.assertFalse(clean["source_verified"])
                     self.assertEqual(clean["approval_basis"], CLEAN_TEXT_POLICY)
                     query = {"tenant": tenant, "provider": "fake", "question": "Who coordinates the synthetic service?"}

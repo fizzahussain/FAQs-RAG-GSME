@@ -23,7 +23,8 @@
   </div>
   <button id="connect">Connect</button>
   <details><summary>Connection details &amp; logs</summary><p class="muted">Use your local token from .env. A reviewer is only needed for manual exceptions. Restart after changing .env. Stage logs also appear in PowerShell and data/logs/console.log.</p><pre id="health"></pre>
-    <button id="showLogs" class="secondary">Recent operation logs</button><pre id="operationLogs"></pre></details>
+    <label for="logRequestId">Request ID (optional, from chatbot Request details)</label><input id="logRequestId" placeholder="Paste request ID to trace one question">
+    <button id="showLogs" class="secondary">Show operation logs</button><pre id="operationLogs"></pre></details>
 </details>
 <nav class="tabs" role="tablist" aria-label="Workspace screens">
   <button id="tab-documents" role="tab" aria-selected="true" aria-controls="panel-documents" data-screen="documents">Documents</button>

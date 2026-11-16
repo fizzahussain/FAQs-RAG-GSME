@@ -26,14 +26,17 @@ class _Line:
     y1: float
     size: float
     bold_share: float
+    block_order: int = 0
+    line_order: int = 0
+    heading_level: int | None = None
 
 
 def _extract_lines(document: fitz.Document) -> list[_Line]:
     lines: list[_Line] = []
     for page_number, page in enumerate(document, start=1):
         page_dict = page.get_text("dict")
-        for block in page_dict.get("blocks", []):
-            for raw_line in block.get("lines", []):
+        for block_order, block in enumerate(page_dict.get("blocks", [])):
+            for line_order, raw_line in enumerate(block.get("lines", [])):
                 spans = raw_line.get("spans", [])
                 text = normalize_inline("".join(span.get("text", "") for span in spans))
                 if not text:
@@ -56,6 +59,7 @@ def _extract_lines(document: fitz.Document) -> list[_Line]:
                         y1=float(bbox[3]),
                         size=max(sizes, default=0.0),
                         bold_share=bold_chars / total_chars if total_chars else 0.0,
+                        block_order=block_order, line_order=line_order,
                     )
                 )
     if len(document) < 2:
@@ -271,10 +275,13 @@ def _layout_markdown(lines: list[_Line], allow_visual_headings: bool = True) -> 
         numbered_section = bool(re.match(r"^\d+(?:\.\d+){1,}\s+\S", line.text))
         chapter = bool(re.match(r"^Chapter\s+\d+\b", line.text, re.I))
         is_heading = (is_heading and allow_visual_headings or numbered_section or chapter
+                      or line.heading_level is not None
                       or line.text.casefold() == "table of contents")
         if is_heading:
             flush_text()
-            if chapter:
+            if line.heading_level is not None:
+                level = line.heading_level
+            elif chapter:
                 level = 1
             elif numbered_section:
                 level = min(6, line.text.split()[0].count(".") + 1)
@@ -298,17 +305,33 @@ def _layout_markdown(lines: list[_Line], allow_visual_headings: bool = True) -> 
 
 
 def _native_markdown(document: fitz.Document, lines: list[_Line],
-                     fidelity_pages: set[int] | None = None) -> tuple[str, list[ParseWarning]]:
+                     fidelity_pages: set[int] | None = None,
+                     fidelity_regions=None) -> tuple[str, list[ParseWarning]]:
     """Keep detected tables intact when the optional Docling backend is unavailable."""
     parts: list[str] = []
     warnings: list[ParseWarning] = []
     image_cache: dict[str, str] = {}
     for page_no, page in enumerate(document, start=1):
         page_lines = [line for line in lines if line.page == page_no]
+        # Presentation slides have page-local titles, often regular-weight text.
+        # Never infer these from OCR. Portrait manuals retain chapter context.
+        slide = page.rect.width >= page.rect.height * 1.3
+        if slide and page_lines:
+            first = min(page_lines, key=lambda line: (line.y0, line.x0))
+            body = median(line.size for line in page_lines)
+            if first.y0 < page.rect.height * .22 and first.size >= max(16, body * 1.25):
+                title = [line for line in page_lines if line.block_order == first.block_order
+                         and abs(line.size-first.size) < 1.5
+                         and line.y0 < first.y0 + first.size * 2.8]
+                first.text = " ".join(line.text for line in sorted(title, key=lambda line: (line.y0,line.x0)))
+                first.heading_level = 1
+                page_lines = [line for line in page_lines if line is first or line not in title]
         tables = list(page.find_tables().tables)
         accepted_tables = []
         entries: list[tuple[float, str | _Line]] = []
-        page_review_required = page_no in (fidelity_pages or set())
+        page_review_required = fidelity_regions is None and page_no in (fidelity_pages or set())
+        suspect_regions = [fitz.Rect(item.bbox) for item in (fidelity_regions or [])
+                           if item.page == page_no and item.bbox]
         for table in tables:
             cells = [[cell or "" for cell in row] for row in table.extract()]
             # Reject one row and full page table guesses
@@ -475,18 +498,33 @@ def _native_markdown(document: fitz.Document, lines: list[_Line],
                 location=f"page {page_no}",
             ))
         parts.append(f"<!-- page: {page_no} -->")
+        if slide:
+            parts.append("<!-- page-context: isolated -->")
         if page_review_required:
             parts.append("<!-- review-required: ocr-or-table -->")
         prose: list[_Line] = []
+        prose_review = False
         def flush_prose() -> None:
             if prose:
                 rendered = _layout_markdown(prose, allow_visual_headings=not chart_text)
                 rendered = re.sub(r"^<!-- page: \d+ -->\s*", "", rendered).strip()
+                if prose_review:
+                    rendered = "<!-- review-required: text-fidelity -->\n\n" + rendered + "\n\n<!-- review-end -->"
                 parts.append(rendered)
                 prose.clear()
 
-        for _, value in sorted(entries, key=lambda entry: entry[0]):
+        # Preserve source text-block groups on slides instead of interleaving
+        # columns by their Y coordinate. This does not verify flowchart arrows.
+        ordered = (sorted(entries, key=lambda entry: (entry[1].block_order, entry[1].line_order))
+                   if slide and all(isinstance(value, _Line) for _, value in entries)
+                   else sorted(entries, key=lambda entry: entry[0]))
+        for _, value in ordered:
             if isinstance(value, _Line):
+                needs_review = any(rect.contains(fitz.Point((value.x0+value.x1)/2,
+                                                            (value.y0+value.y1)/2)) for rect in suspect_regions)
+                if prose and (needs_review != prose_review or slide and value.block_order != prose[-1].block_order):
+                    flush_prose()
+                prose_review = needs_review
                 prose.append(value)
             else:
                 flush_prose()
@@ -940,7 +978,8 @@ def _parse_pdf_to_markdown(
             page.get_images() or page.find_tables().tables or len(page.get_drawings()) >= 10
             for page in document
         )
-        if lines and not special_faq and not complex_layout and backend != "docling":
+        if (lines and not special_faq and not complex_layout and backend != "docling"
+                and not any(page.rect.width >= page.rect.height * 1.3 for page in document)):
             from gsme_rag.parsing.fidelity import inspect_pdf_fidelity
             diagnostics, fidelity_warnings, review_pages = inspect_pdf_fidelity(document, max_ocr_regions=0)
             return ParsedDocument(
@@ -996,7 +1035,10 @@ def _parse_pdf_to_markdown(
             from gsme_rag.parsing.fidelity import inspect_pdf_fidelity
             fidelity_evidence, fidelity_warnings, fidelity_pages = inspect_pdf_fidelity(
                 document, max_ocr_regions=0)
-            markdown, native_warnings = _native_markdown(document, lines, fidelity_pages)
+            markdown, native_warnings = _native_markdown(document, lines, fidelity_pages, fidelity_evidence)
+            for warning in fidelity_warnings:
+                if warning.code == "text_fidelity_needs_review":
+                    warning.code = "text_fidelity_region_needs_review"
             markdown, _ = _remove_repeated_pdf_furniture(markdown, document)
             warnings.extend(native_warnings)
             warnings.extend(fidelity_warnings)

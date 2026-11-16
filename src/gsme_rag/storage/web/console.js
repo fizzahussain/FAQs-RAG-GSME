@@ -225,7 +225,8 @@ el("previous").onclick = () => run(async () => { offset = Math.max(0,offset-page
 el("next").onclick = () => run(async () => { if (nextOffset !== null) { offset=nextOffset; await loadInspection(); } });
 el("provider").onchange = () => { el("uploadExternal").checked=false; el("external").checked = false; el("retrievalExternal").checked = false; updateControls(); };
 el("showLogs").onclick=()=>run(async()=>{
-  const result=await json("logs"); show("operationLogs",result.entries.join("\n") || result.note || "No recent operations.");
+  const requestId=el("logRequestId").value.trim();
+  const result=await json("logs?limit=200"+(requestId?"&request_id="+encodeURIComponent(requestId):"")); show("operationLogs",result.entries.join("\n") || result.note || "No matching operations in retained logs.");
 });
 el("file").onchange=()=>{el("uploadExternal").checked=false; el("ingestSummary").textContent="";};
 for (const input of ["question","tenant","retrievalDocument","retrievalCategory","retrievalSource"]) {

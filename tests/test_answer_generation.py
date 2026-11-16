@@ -37,6 +37,13 @@ def provider(name, value=None, error=None):
 
 
 class AnswerTests(TestCase):
+    def test_broad_topic_overview_and_flowchart_sequence_rules_are_explicit(self):
+        from gsme_rag.generation.answers import messages_for
+        messages = messages_for("about TSMC", [])
+        self.assertIn('breadth alone is not ambiguity', messages[0]["content"])
+        self.assertIn('Text order of flowchart labels does not verify arrows', messages[0]["content"])
+        self.assertEqual(json.loads(messages[1]["content"])["question"], "about TSMC")
+
     def test_answer_timing_includes_provider_latency(self):
         clock = Mock()
         clock.perf_counter.side_effect = [10, 12.5]

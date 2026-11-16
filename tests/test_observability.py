@@ -99,3 +99,12 @@ class OperatorLoggingTests(TestCase):
                 self.assertEqual(response.json()["entries"], ["stage 2", "stage 3"])
                 self.assertEqual(response.headers["Cache-Control"], "no-store")
                 self.assertEqual(client.get("/api/logs?limit=201", headers=headers).status_code, 422)
+                request_id='49ee7123-4ce4-4bd1-9296-075aa2feb6d0'
+                (root/'logs'/'console.log.1').write_text('INFO '+json.dumps({'request_id':request_id,'event':'embedding'})+'\n',encoding='utf-8')
+                (root/'logs'/'console.log').write_text('INFO '+json.dumps({'request_id':request_id,'event':'answer'})+'\n'+
+                    'INFO '+json.dumps({'request_id':'other','event':'private-other-request'})+'\n',encoding='utf-8')
+                result=client.get('/api/logs?request_id='+request_id,headers=headers)
+                self.assertEqual(len(result.json()['entries']),2)
+                self.assertIn('embedding',result.json()['entries'][0])
+                self.assertNotIn('private-other-request',result.text)
+                self.assertEqual(client.get('/api/logs?request_id=not-a-uuid',headers=headers).status_code,422)

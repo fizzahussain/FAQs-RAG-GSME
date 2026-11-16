@@ -1,7 +1,7 @@
 """Owner-only uploads and explicitly published FAQ versions, deny by default.
 
-An identity comes from verified Google claims, never a browser-selected tenant,
-email, document ID or workspace label. Source acceptance is still independent.
+An identity comes from verified Google claims or an opaque server-issued browser
+session, never a browser-selected owner or tenant. Source acceptance is independent.
 """
 
 from dataclasses import dataclass
@@ -11,6 +11,10 @@ from uuid import UUID
 @dataclass(frozen=True)
 class Principal:
     subject: str | None
+
+    @property
+    def company_signed_in(self):
+        return bool(self.subject and self.subject.startswith("google:"))
 
 
 class AccessStore:
@@ -29,7 +33,7 @@ class AccessStore:
         return (""" AND (a.owner_subject=%s OR
             (""" + shared + """ AND a.public_version_id=v.id
              AND d.current_version_id=v.id AND %s))""",
-            [self.principal.subject, self.principal.subject is not None or self.allow_guests])
+            [self.principal.subject, self.principal.company_signed_in or self.allow_guests])
 
     def visible_version(self, version, download=False):
         clause, params = self._clause(download)
@@ -56,6 +60,36 @@ class AccessStore:
                 (self.principal.subject, document, self.tenant)).fetchone()
             if not changed:
                 raise ValueError("Cannot assign ownership to an existing access policy")
+
+    def remove_owned_document(self, version):
+        """Revoke this upload atomically; retain original/evidence for recovery.
+
+        Relational authorization also excludes stale Qdrant points immediately.
+        Cancelling ingestion leases prevents a running parse from resurrecting it.
+        Shared library deletion is deliberately not a public browser capability.
+        """
+        if not self.principal.subject:
+            return False
+        with self.store.connect() as db:
+            row = db.execute("""SELECT d.id FROM documents d
+                JOIN document_versions v ON v.document_id=d.id
+                JOIN document_access a ON a.document_id=d.id
+                WHERE d.tenant_id=%s AND v.id=%s AND a.owner_subject=%s
+                AND a.visibility='private' AND NOT a.deletion_protected FOR UPDATE OF d,a""",
+                (self.tenant, version, self.principal.subject)).fetchone()
+            if not row:
+                return False
+            document = row["id"]
+            db.execute("""UPDATE ingestion_jobs SET state='failed',claimed_at=NULL,
+                last_error='Upload removed by owner',updated_at=now()
+                WHERE version_id IN (SELECT id FROM document_versions WHERE document_id=%s)""", (document,))
+            db.execute("""UPDATE index_jobs SET state='superseded',updated_at=now()
+                WHERE chunk_id IN (SELECT c.id FROM evidence_chunks c JOIN document_versions v
+                ON v.id=c.version_id WHERE v.document_id=%s)""", (document,))
+            db.execute("UPDATE document_versions SET state='superseded' WHERE document_id=%s", (document,))
+            db.execute("UPDATE documents SET current_version_id=NULL WHERE id=%s", (document,))
+            db.execute("DELETE FROM document_access WHERE document_id=%s", (document,))
+            return True
 
     def retrieval_scope(self, tenant, model, collection, document=None, category=None, filename=None):
         self._tenant(tenant)
@@ -106,13 +140,25 @@ class AccessStore:
     def visible_documents(self):
         clause, params = self._clause()
         with self.store.connect() as db:
-            return db.execute("""SELECT v.id AS version_id,v.document_id,v.source_file,v.state,
-                a.visibility,(a.owner_subject=%s) AS owned FROM document_versions v
+            rows = db.execute("""SELECT v.id AS version_id,v.document_id,v.source_file,v.state,v.document_class,
+                (SELECT count(*) FROM evidence_chunks c WHERE c.version_id=v.id AND c.evidence_status='approved') AS accepted,
+                (SELECT count(DISTINCT j.chunk_id) FROM index_jobs j JOIN evidence_chunks c ON c.id=j.chunk_id
+                 WHERE c.version_id=v.id AND j.state='indexed') AS indexed,
+                a.visibility,a.deletion_protected,(a.owner_subject=%s) AS owned FROM document_versions v
                 JOIN documents d ON d.id=v.document_id JOIN document_access a ON a.document_id=d.id
                 WHERE d.tenant_id=%s AND a.tenant_id=%s AND
                 (d.current_version_id=v.id OR (a.owner_subject=%s AND v.state NOT IN ('superseded')))
                 """ + clause + " AND (a.visibility<>'company_schedule' OR a.owner_subject=%s) ORDER BY v.created_at DESC LIMIT 101",
                 [self.principal.subject, self.tenant, self.tenant, self.principal.subject] + params + [self.principal.subject]).fetchall()
+        # A reprocessed version is the same document, not another sidebar file.
+        # Owners see its latest attempt; shared readers still see only the exact
+        # published version selected by the authorization clause above.
+        seen, documents = set(), []
+        for row in rows:
+            if row["document_id"] not in seen:
+                seen.add(row["document_id"])
+                documents.append(row)
+        return documents
 
     def schedule_search(self, tenant, query, document_id=None):
         self._tenant(tenant)

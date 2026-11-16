@@ -1,7 +1,58 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GSME Muse</title><link rel="stylesheet" href="/assets/chat.css"><script src="/assets/chat.js" defer></script></head>
-<body><header><strong>GSME Muse</strong><span>FAQs and document answers</span><button id="signin">Sign in for private documents</button><button id="signout" hidden>Sign out</button><div id="googleButton"></div></header>
-<main><p id="notice" role="status">Ask about company FAQs. Sign in to use your private documents.</p><section id="messages" aria-live="polite" aria-label="Conversation"></section>
-<form id="ask"><label for="question">Your question</label><textarea id="question" rows="3" maxlength="4000" required placeholder="Ask a question…"></textarea><div class="actions"><select id="scope" aria-label="Document scope"><option value="">All accessible documents</option></select><button id="send">Send</button></div></form>
-<details><summary>My documents</summary><p>Uploads are owner-only. Accepted text may be sent to company-approved AI services. Uncertain extraction stays held. Do not upload content your organization prohibits.</p><form id="upload"><input id="file" type="file" accept=".pdf,.docx,.pptx,.xlsx,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp" aria-label="Private document" required><button>Upload privately</button></form><button id="refresh" type="button">Refresh documents</button><div id="documents"></div></details></main>
-<footer>Answers are based on accessible evidence, not a guarantee. Check source extracts and original documents. Each question performs a fresh search.</footer></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f4f7f6">
+  <title>GSME Muse · Document chat</title>
+  <link rel="stylesheet" href="/assets/chat.css">
+  <script src="/assets/chat.js" defer></script>
+</head>
+<body>
+  <dialog id="sidebar" open aria-label="Workspace navigation">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">m</span><div><strong>GSME Muse</strong><span>YOUR KNOWLEDGE WORKSPACE</span></div><button id="close-sidebar" class="icon-button mobile-only" aria-label="Close navigation" type="button">×</button></div>
+    <button id="new-chat" class="new-chat" type="button"><span aria-hidden="true">＋</span> New chat</button>
+    <div class="sidebar-section-heading"><h2>Documents <span id="document-count">0</span></h2><button id="refresh" class="icon-button" type="button" aria-label="Refresh documents" title="Refresh documents">↻</button></div>
+    <label class="sr-only" for="document-search">Find a document</label><input id="document-search" type="search" placeholder="Find a document…" autocomplete="off">
+    <nav id="document-links" aria-label="Open documents"></nav>
+    <p id="file-empty" class="muted">Your shared files and uploads appear here.</p>
+    <button id="sidebar-upload" class="secondary-button" type="button" disabled>＋ Upload document</button>
+    <details id="file-panel"><summary>Processing &amp; file details</summary><div id="documents"></div></details>
+    <div class="sidebar-footer">
+      <details><summary>About your workspace</summary><p id="workspace-note">Files are opened locally in this app. Questions search approved document evidence independently.</p><p>PDF, Word, Excel, PowerPoint, CSV and images · up to 20 MiB. Accepted text may be sent to configured AI services. Uncertain extraction stays held.</p></details>
+      <button id="signin" class="secondary-button" hidden>Company sign-in</button><button id="signout" class="secondary-button" hidden>Sign out</button><div id="googleButton"></div>
+      <span class="workspace-label"><span aria-hidden="true">●</span> Document workspace</span>
+    </div>
+  </dialog>
+  <main class="chat-workspace">
+    <header class="chat-header"><div class="header-title"><button id="open-sidebar" class="icon-button mobile-only" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">☰</button><div><strong>Document chat</strong><span>FAQs, manufacturing &amp; more</span></div></div><span class="header-badge">Source-linked answers</span></header>
+    <div class="timeline-wrap">
+      <div id="conversation-scroll" tabindex="0" aria-label="Scrollable conversation">
+        <section id="welcome" class="welcome">
+          <span class="welcome-mark" aria-hidden="true">m</span><span class="eyebrow">MEET YOUR KNOWLEDGE ASSISTANT</span>
+          <h1>A little clarity.<br>A lot less searching.</h1>
+          <p>Ask a question. Find the answer in your documents.<br>See exactly where it came from.</p>
+          <div class="suggestions" aria-label="Example questions">
+            <button type="button" data-question="What should I do if my tapeout must be postponed?"><span>EXPLORE THE FAQs</span>How can I postpone a tapeout?<b aria-hidden="true">↗</b></button>
+            <button type="button" data-question="What does MTTF stand for?"><span>UNDERSTAND A CONCEPT</span>What does MTTF mean?<b aria-hidden="true">↗</b></button>
+            <button type="button" data-question="How does the Shared Block tapeout service work?"><span>GET THE DETAILS</span>How does Shared Block work?<b aria-hidden="true">↗</b></button>
+          </div>
+        </section>
+        <section id="messages" aria-live="polite" aria-label="Conversation"></section>
+      </div>
+      <button id="jump-latest" class="secondary-button" type="button" hidden>Latest messages ↓</button>
+    </div>
+    <div class="composer-dock">
+      <p id="notice" role="status">Opening your workspace…</p>
+      <form id="ask">
+        <div class="scope-row"><label for="scope">Search in</label><select id="scope" aria-label="Document scope"><option value="">All files</option></select></div>
+        <label class="sr-only" for="question">Your question</label>
+        <div class="composer"><button id="attach" type="button" aria-label="Upload a document" title="Upload a document" disabled>+</button><textarea id="question" rows="1" maxlength="4000" required placeholder="Ask about your documents…"></textarea><button id="send" type="submit" disabled><span>Send</span> <span aria-hidden="true">↑</span></button></div>
+      </form>
+      <div class="composer-hint"><span>Check the sources. Questions are searched independently.</span><span>Enter to send · Shift+Enter for a new line</span></div>
+    </div>
+  </main>
+  <form id="upload" hidden><input id="file" type="file" accept=".pdf,.docx,.pptx,.xlsx,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp" aria-label="Choose document" required><button id="upload-submit" disabled>Upload document</button></form>
+  <dialog id="document-viewer" aria-labelledby="viewer-title"><div class="viewer-heading"><strong id="viewer-title">Document</strong><button id="viewer-close" class="secondary-button" type="button" aria-label="Close document preview">Close</button></div><p id="viewer-note" class="citation"></p><iframe id="viewer-pdf" title="Original PDF" hidden></iframe><img id="viewer-image" alt="Original document image" hidden><pre id="viewer-text" hidden></pre></dialog>
+</body>
+</html>

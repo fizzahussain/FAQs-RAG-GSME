@@ -16,7 +16,7 @@ from psycopg.rows import dict_row
 from gsme_rag.chunking.chunker import CHUNKER_VERSION
 from gsme_rag.models import MarkdownChunk
 from gsme_rag.storage.files import checksum, save_original, verified_markdown
-from gsme_rag.storage.acceptance import CLEAN_TEXT_POLICY, clean_text_eligible
+from gsme_rag.storage.acceptance import CLEAN_TEXT_POLICY, clean_text_eligible, chunk_warning_codes as _chunk_warning_codes
 from gsme_rag.parsing.schedules import resolve_schedule_kind, is_schedule_header, parse_schedule_workbook
 from gsme_rag.version import PARSER_VERSION
 from gsme_rag.parsing.profile import source_profile
@@ -36,6 +36,7 @@ def _page_warning_codes(parsed, chunk: MarkdownChunk) -> list[str]:
         warning.code
         for warning in parsed.warnings
         if warning.code != "link_target_missing"
+        and (warning.code != "text_fidelity_region_needs_review" or chunk.review_required)
         and (match := re.match(r"page (\d+)(?:\b|;)", warning.location or ""))
         and chunk.source_page_start <= int(match.group(1)) <= last
     }
@@ -343,8 +344,9 @@ class EvidenceStore:
     def retry_job(self, tenant_id: str, job_id: str) -> bool:
         with self.connect() as db:
             row = db.execute(
-                """SELECT id,version_id FROM ingestion_jobs WHERE tenant_id=%s
-                 AND id=%s AND state='failed' FOR UPDATE""",
+                """SELECT j.id,j.version_id FROM ingestion_jobs j
+                 JOIN document_versions v ON v.id=j.version_id WHERE j.tenant_id=%s
+                 AND j.id=%s AND j.state='failed' AND v.state='failed' FOR UPDATE OF j""",
                 (tenant_id, job_id),
             ).fetchone()
             if not row:
@@ -574,8 +576,11 @@ class EvidenceStore:
                 ORDER BY c.id FOR UPDATE OF c""", (version_id,)).fetchall()
             accepted = 0
             for row in rows:
+                # Scope legacy page-wide warnings at decision time. Stored
+                # evidence/provenance and prior review decisions stay immutable.
+                codes = _chunk_warning_codes(row["warning_codes"], row["chunk_type"], row["review_required"])
                 if not clean_text_eligible(row["evidence_text"], row["chunk_type"], row["review_required"],
-                                           row["evidence_status"], row["warning_codes"]):
+                                           row["evidence_status"], codes):
                     continue
                 db.execute("""INSERT INTO review_decisions
                     (id,chunk_id,decision,source_verified,reviewer,rationale,approval_basis)

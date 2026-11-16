@@ -105,6 +105,10 @@ def _parse_blocks(markdown: str) -> list[_Block]:
             blocks.append(_Block("separator", "", current_page, current_page))
             index += 1
             continue
+        if stripped == "<!-- page-context: isolated -->":
+            blocks.append(_Block("context_reset", "", current_page, current_page))
+            index += 1
+            continue
 
         table_marker = TABLE_ROW_MARKER.match(stripped)
         if table_marker:
@@ -542,6 +546,13 @@ def _blocks_to_units(blocks: list[_Block], split_paragraphs: bool = False,
             if any(item.kind == "heading" and item.level == 1 for item in upcoming):
                 heading_stack = []
                 paper_section = False
+            index += 1
+            continue
+
+        if block.kind == "context_reset":
+            flush_generic()
+            heading_stack = []
+            paper_section = False
             index += 1
             continue
 

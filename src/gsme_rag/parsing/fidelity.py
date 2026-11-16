@@ -28,6 +28,15 @@ def _reason(text: str) -> str | None:
     return None
 
 
+def _explanatory_chain(text: str) -> bool:
+    """Identify a prose equality chain only to localize its review region.
+
+    It is still held, not accepted as a formula or silently rewritten.
+    """
+    return (text.count("=") >= 2 and not re.search(r"[0-9×÷±≤≥∑∏√δσμ]", text)
+            and all(len(re.findall(r"[A-Za-z]+", part)) >= 2 for part in text.split("=")))
+
+
 def inspect_pdf_fidelity(document: fitz.Document, max_ocr_regions: int = 8):
     """Scan source blocks and OCR only a bounded set of suspicious regions."""
     evidence: list[EvidenceDiagnostic] = []
@@ -43,6 +52,16 @@ def inspect_pdf_fidelity(document: fitz.Document, max_ocr_regions: int = 8):
             if not reason:
                 continue
             source_box = fitz.Rect(block[:4])
+            # A later bullet with prose '=' shorthand must not quarantine the
+            # unrelated selectable definition above it in the same PDF block.
+            chains = [line.strip() for line in raw.splitlines() if _explanatory_chain(line)]
+            if len(chains) == 1 and _reason(raw.replace(chains[0], "")) is None:
+                boxes = [line["bbox"] for item in page.get_text("dict").get("blocks", [])
+                         for line in item.get("lines", [])
+                         if "".join(span.get("text", "") for span in line.get("spans", [])).strip() == chains[0]
+                         and source_box.intersects(fitz.Rect(line["bbox"]))]
+                if len(boxes) == 1:
+                    raw, source_box = chains[0], fitz.Rect(boxes[0])
             # Check the full equation region around incomplete text
             region = (fitz.Rect(source_box.x0 - 5, source_box.y0 - 5,
                                 min(page.rect.x1, source_box.x1 + 250),

@@ -96,6 +96,9 @@ def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, quest
     scope = store.retrieval_scope(tenant_id, provider.model_version, vectors.collection,
                                   options.document_id, options.category, options.source_file)
     timings["eligibility"] = round((time.perf_counter() - started) * 1000, 3)
+    emit("retrieval.eligibility", request_id=report["request_id"], eligible=len(scope),
+         document_id=options.document_id, model=provider.model_version,
+         collection=vectors.collection, min_rerank_score=options.min_rerank_score)
     if not scope:
         return finish("no_eligible_evidence")
     phase = time.perf_counter()
@@ -128,6 +131,7 @@ def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, quest
             if len(candidates) == options.candidate_count:
                 break
     if not candidates:
+        emit("retrieval.candidates.filtered", request_id=report["request_id"], hits=len(hits), candidates=0)
         return finish("no_candidates")
     phase = time.perf_counter()
     report["rerank_input_count"] = len(candidates)
@@ -167,6 +171,9 @@ def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, quest
                 "chunk_id": row["source_chunk_id"], "source_file": row["source_file"],
                 "page_start": row["source_page_start"], "retrieval_rank": item.index + 1,
                 "retrieval_score": float(hit.score), "rerank_rank": rank, "rerank_score": item.score})
+    emit("retrieval.ranking", request_id=report["request_id"], hits=len(hits), candidates=len(candidates),
+         ranked_chunks=[{key: r[key] for key in ("version_id", "chunk_id", "retrieval_rank", "rerank_rank", "rerank_score")}
+                        for r in report["reranked_candidates"]])
     used_units = set()
     used_texts = set()
     used_chars = 0

@@ -266,15 +266,31 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
         return _safe(lambda: store.library(tenant, model, collection))
 
     @app.get("/api/logs", dependencies=[Depends(authorize)])
-    def recent_logs(limit: int = Query(default=80, ge=1, le=200)):
+    def recent_logs(limit: int = Query(default=80, ge=1, le=200), request_id: UUID | None = None):
         path = settings.data_dir / "logs" / "console.log"
         if path.is_symlink() or not path.resolve().is_relative_to(settings.data_dir.resolve()):
             raise HTTPException(404, "Operator log unavailable")
         if not path.is_file():
             return {"entries": [], "note": "Logs appear after starting python -m gsme_rag.storage.admin"}
-        with path.open(encoding="utf-8") as stream:
-            lines = [line.rstrip("\n") for line in deque(stream, maxlen=limit)]
-        return JSONResponse({"entries": lines}, headers={"Cache-Control": "no-store"})
+        lines = deque(maxlen=limit)
+        # Inspect only the four fixed rotating files, never a browser-given path.
+        for candidate in [path.with_name('console.log.'+str(n)) for n in (3,2,1)] + [path]:
+            if candidate.is_symlink() or not candidate.resolve().is_relative_to(settings.data_dir.resolve()):
+                continue
+            try:
+                with candidate.open(encoding='utf-8', errors='replace') as stream:
+                    content = stream.read(2_100_000)
+            except FileNotFoundError:
+                continue
+            for line in content.splitlines():
+                if request_id is not None:
+                    try:
+                        if json.loads(line[line.index('{'):]).get('request_id') != str(request_id):
+                            continue
+                    except (ValueError, AttributeError):
+                        continue
+                lines.append(line)
+        return JSONResponse({"entries": list(lines)}, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/status/{job_id}", dependencies=[Depends(authorize)])
     def status(job_id: Identifier, tenant: Tenant):
