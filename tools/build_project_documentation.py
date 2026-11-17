@@ -20,6 +20,20 @@ from gsme_rag.version import __version__, PARSER_VERSION, CHUNKER_VERSION, RETRI
 ROOT = Path(__file__).resolve().parents[1]
 
 
+# A talk-through at the front makes the detailed reference usable in a meeting.
+SUPERVISOR_BRIEFING = [
+    ("0.1 A concise opening", "While you were away, I completed the retrieval path around the document pipeline: approved text is embedded and stored with provenance, then user questions search that evidence with dense semantic vectors plus BM25 keyword matching. A reranker reorders a bounded candidate set before an answer model writes a cited response. I also addressed a reliability gap: when Cohere is unavailable, the hosted app can use the already-built local BM25 index and Ollama instead of stopping before an answer can be attempted. The system still abstains when the retained evidence cannot support an answer."),
+    ("0.2 What happens to a document", "The original file is hashed and retained. The parser extracts text and source locations; the chunker makes evidence-sized units while preserving headings, pages and table/FAQ relationships. Uncertain OCR, formulas, charts and tables remain held from trusted indexing until their review gate allows them. PostgreSQL records versions, access, review state and indexing jobs. For each eligible accepted chunk, Cohere embed-v5.0-pro creates a 1,024-number vector (default dimension). The vector and a derived searchable text payload go to Qdrant; PostgreSQL remains the authority for whether that point is current, approved, indexed and visible to this caller. A change creates a new version and indexing state, not an invisible rewrite of the old source."),
+    ("0.3 Embedding model and dimensions", "The current Cohere adapter uses asymmetric embedding inputs: embed-v5.0-pro with search_document for passages, and embed-v5.0-fast with search_query for a question. Both must produce vectors of the same configured size; GSME_EMBED_DIMENSION defaults to 1024. A vector is a fixed-length numeric representation used for nearest-neighbour search, not a stored answer or a source-of-truth record. The configured Qdrant collection uses cosine distance and refuses a dimension mismatch. Document embeddings can be reused only for identical text, tenant, model and dimension after the new evidence independently passes eligibility. Changing embedding model or dimensions requires a compatible new index/re-index plan. Ollama outage retrieval does not create or mix a different embedding space."),
+    ("0.4 What happens to one question and what top-k means", "The hosted chatbot normally asks for 30 candidates and returns up to top_k=5 evidence units (allowed range 1–20). Dense search compares the query vector with accepted indexed vectors. BM25 ranks exact terms against the searchable text in the same Qdrant collection. Hybrid mode combines those ranked lists with reciprocal-rank fusion (RRF); the hosted UI uses hybrid even if the legacy GSME_HYBRID environment value says false. PostgreSQL supplies the allowed point-ID list and the result is checked again after vector search, so a Qdrant payload alone cannot authorize a passage. The reranker then receives the question and no more than 30 eligible passages, scores/ranks them for this particular question, and the system selects up to five complete evidence units within a 16,000-character context budget. Top-k is the number of final evidence units, not the number of embedding dimensions, all indexed chunks, or guaranteed citations. The answer can cite fewer than five; it should cite only sources actually used. Candidate/re-rank scores describe relative ranking, not a calibrated probability of correctness."),
+    ("0.5 Reranking: what is sent and why", "Retrieval is designed for recall: dense and keyword search bring plausible candidates into a shortlist. Reranking is designed to improve precision: Cohere rerank-v5.0-pro compares the question against each shortlisted passage and orders the passages by relevance before context assembly. With the normal defaults this means at most 30 passage texts plus the question go to Cohere for one rerank; fewer go if the filtered shortlist is smaller. This is not a prompt containing the entire library. The application records retrieval rank, rerank rank and score for diagnosis. Rerank is required for a generated document answer; a provider failure does not silently expose raw unreranked hits as an answer."),
+    ("0.6 What is stored where", "PostgreSQL stores document/version metadata, source/chunk records, approval and review decisions, access policies, durable jobs, schedule rows and owner-scoped chats. Qdrant stores derived 1,024-dimensional vectors, a text payload used by BM25 and filtering metadata; it is an index, not the authority for approval or ownership. The configured data directory stores original files, normalized Markdown, manifests and logs. This division lets the system recheck access against PostgreSQL even if a vector or text index is stale. It also means a PostgreSQL/Qdrant outage affects hosted search; Ollama does not replace those storage services."),
+    ("0.7 Ollama when Cohere has an outage", "The previous fallback only covered answer generation, so a Cohere quota error during query embedding or reranking stopped the request before Ollama could help. The current hosted recovery closes that specific gap. After a classified Cohere outage, it searches the existing BM25 text index over the same PostgreSQL-authorized indexed IDs. It then asks the already-installed local GSME_OLLAMA_MODEL (default qwen3:4b) to rank at most GSME_LOCAL_RERANK_CANDIDATES=10 complete passages; if requested top_k is larger, the cap rises only enough to meet top-k. It sends the retained, checked evidence directly to Ollama for generation, bypassing exhausted Cohere answer calls. The result is visibly labelled as degraded local recovery. A short process-local cooldown avoids repeatedly calling a quota-limited provider. Local scoring is serialized, input/timeout-bounded and caches only hashes plus validated scores. This improves availability, not semantic recall: BM25 can miss paraphrases and the small local model can be slower or less accurate. It cannot embed new uploads, manufacture compatible vectors, provide exact Cohere-equivalent reranking, or bypass source access, citation and abstention checks. There is deliberately no unreranked fallback."),
+    ("0.8 Schedule search is a different path", "Full and Shared schedule CSVs are treated as typed, versioned schedule records and searched with exact filters for schedule kind, technology, flavor, milestone and date. This path does not send schedule questions to embeddings, BM25, reranking or a generative model. It preserves row provenance and reports ambiguity rather than guessing a schedule. Semantic document chat and deterministic schedule lookup are two separate capabilities in the same application."),
+    ("0.9 What the verification says—and does not say", "The 0.19.12 regression run reports 399 passing tests and 3 skips because the original three-page PDF fixture is unavailable in this checkout. The final focused retrieval/API recheck passed 51 tests. A synthetic local-service exercise simulated Cohere quota failure, prohibited external generation, and confirmed cited JSON and streaming answers through qwen3:4b while private canary text stayed excluded. The first local request took about 110 seconds; a repeat took about 18 seconds. Ten-passage local ranking took about 44 seconds on the test machine and its validated score-cache repeat did not invoke inference. These figures demonstrate the path, not production latency or company-corpus answer quality. The remaining skipped source checks and human verification of uncertain source evidence must be disclosed."),
+]
+
+
 # Descriptions distinguish source-integrity guarantees from model quality claims.
 SECTIONS = [
 ("1. Project purpose and delivery boundaries", [
@@ -203,7 +217,7 @@ def build(output, verification):
     footer._p.append(field)
 
     doc.add_paragraph("GSME Muse", "Title")
-    doc.add_paragraph("Complete Technical Implementation & Project Handover", "Subtitle")
+    doc.add_paragraph("Complete Technical Implementation & Supervisor Handover", "Subtitle")
     doc.add_paragraph("Parsing • Chunking • Evidence review • Embeddings • Storage\nHybrid retrieval • Reranking • Cited answers • Schedule search\nHosted chatbot • Multi-chat history • Testing • Operations")
     add_table(doc, ["Document control", "Value"], [
         ("Application version", __version__), ("Parser / chunker / retrieval versions", f"{PARSER_VERSION} / {CHUNKER_VERSION} / {RETRIEVAL_VERSION}"),
@@ -217,9 +231,25 @@ def build(output, verification):
     doc.add_page_break()
     doc.add_heading("Contents", 1)
     # A static contents list is immediately useful in viewers that do not update Word fields.
+    doc.add_paragraph("0. Supervisor briefing: explain the system")
     for title, _ in SECTIONS:
         doc.add_paragraph(title)
     doc.add_paragraph("20. Verification record\nAppendix A. Module map\nAppendix B. Hosted API reference\nAppendix C. SQL migration inventory\nAppendix D. Configuration checklist\nAppendix E. Numerical defaults and limits\nAppendix F. Streaming event contract\nAppendix G. Demonstration script and question bank\nAppendix H. Replacing shared sources safely\nAppendix I. Version 0.19.9 source and security audit\nAppendix J. Version 0.19.10 admin workspace")
+
+    doc.add_page_break()
+    doc.add_heading("0. Supervisor briefing: explain the system", 1)
+    add_table(doc, ["Topic", "Current implementation detail"], [
+        ("Document embedding", "Cohere embed-v5.0-pro / search_document; 1,024 dimensions by default; batches of 16."),
+        ("Question embedding", "Cohere embed-v5.0-fast / search_query; same 1,024-dimension space."),
+        ("Storage", "PostgreSQL is authority for versions, access, approvals/jobs and schedules; Qdrant holds vectors and BM25 text index; data/ holds original and normalized artifacts."),
+        ("Normal search", "Hosted app: hybrid dense + BM25, fused by RRF; 30 requested candidates; up to 30 sent to Cohere reranker; top_k defaults to 5."),
+        ("Answer", "Cohere Command by default; optional Gemini configuration; local Ollama qwen3:4b fallback. Citation, source access and abstention checks remain server-side."),
+        ("Outage recovery", "Existing SQL-authorized BM25 points + bounded local Ollama ranking (default cap 10) + local answer generation. No unreranked path and no local document embedding."),
+        ("Schedule search", "Typed Full/Shared rows and exact filtering; separate from semantic retrieval and does not call an LLM."),
+    ])
+    for heading, paragraph in SUPERVISOR_BRIEFING:
+        doc.add_heading(heading, 2)
+        doc.add_paragraph(paragraph)
 
     for title, items in SECTIONS:
         doc.add_page_break()
@@ -256,7 +286,7 @@ def build(output, verification):
         ("storage/providers.py; storage/vectors.py", "Embedding/transport adapters and derived vector/lexical index"),
         ("storage/acceptance.py", "Conservative automatic clean-text policy"),
         ("retrieval/service.py; retrieval/planning.py", "Scoped candidate search, fusion, reranking and bounded context"),
-        ("retrieval/reranking.py", "Cross-encoder adapter and strict rank validation"),
+        ("retrieval/reranking.py; retrieval/local_fallback.py", "Cohere reranker, bounded Ollama outage ranking and strict result validation"),
         ("retrieval/schedules.py; parsing/schedules.py", "Typed schedule import, filters, dates and snapshots"),
         ("generation/answers.py; generation/gemini.py", "Primary/fallback answers, schema/citation validation and repeatability"),
         ("generation/compression.py", "Optional exact paragraph selection"),
@@ -293,6 +323,7 @@ def build(output, verification):
         ("Local services", "GSME_DATABASE_URL, GSME_POSTGRES_PASSWORD, GSME_QDRANT_URL, GSME_DATA_DIR; never copy real values into this document"),
         ("Embedding", "GSME_EMBED_DIMENSION=1024, GSME_EMBED_BATCH=16, GSME_WORKER_BATCH=8, GSME_MAX_TOKENS=8192; COHERE_API_KEY and external-content approval required for real provider"),
         ("Reranking", "GSME_RERANK_MODEL, GSME_RERANK_TIMEOUT, GSME_RERANK_INPUT_BUDGET; separate GSME_RERANK_CONTENT_APPROVED"),
+        ("Local outage recovery", "GSME_LOCAL_OUTAGE_FALLBACK=yes; GSME_LOCAL_RERANK_CANDIDATES=10; Ollama model must already be installed and served locally"),
         ("Answers", "GSME_ANSWER_PROVIDER, GSME_ANSWER_MODEL, GSME_ANSWER_TIMEOUT, GSME_ANSWER_CONTENT_APPROVED, GSME_OLLAMA_MODEL"),
         ("Optional Gemini", "GEMINI_API_KEY, GSME_GEMINI_MODEL and GSME_GEMINI_CONTENT_APPROVED; answer-model choice does not migrate embeddings/reranking"),
         ("Parsing/chunking", "GSME_PDF_BACKEND and GSME_CHUNK_STRATEGY; Tesseract/English visibility; optional Docling and local semantic model digest"),
@@ -309,6 +340,7 @@ def build(output, verification):
         ("Embedding tokens", "8,192", "Preflight budget, separate from chunk characters and prompt bytes"),
         ("Batches / worker lease", "16 embedding batch; 8 claimed jobs; 300-second lease", "Bound work and refresh leases during long operations"),
         ("Candidate / result counts", "30 / 5", "Up to 30 passages reranked; 5 final units, with separately labeled source context"),
+        ("Local outage candidate cap", "10 by default; at least requested top_k; maximum 30", "Bounds local CPU work; may reduce recall compared with normal 30-candidate Cohere path"),
         ("Retrieval context", "16,000 characters", "Whole evidence units omitted rather than truncated when over budget"),
         ("Relevance threshold", "Unset", "Requires verified tuning/held-out calibration; not a correctness probability"),
         ("Query variants", "Original by default; at most 3 with opt-in modes", "Hosted chat does not silently enable multi-query"),

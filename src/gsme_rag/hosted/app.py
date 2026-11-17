@@ -54,6 +54,15 @@ UPLOAD_ERROR_MESSAGES = {
     "source_review_required": "The extracted content needs source review before it can be searched.",
 }
 
+LOCAL_SEARCH_ERRORS = {
+    "local_ollama_offline": "Local fallback is offline. Start Ollama with ollama serve, then ask again.",
+    "local_ollama_timeout": "Local fallback timed out. The model may be too slow or busy; try again after it finishes.",
+    "local_rerank_failed": "Local fallback could not validate a ranking. Check that the configured Ollama model is installed; no unreranked answer was released.",
+    "local_busy": "Local fallback is busy with another search. Please try again shortly.",
+    "local_input_budget": "These passages exceed the local fallback input limit. Evidence was not truncated; use the normal provider or inspect the source.",
+    "local_threshold_uncalibrated": "Local fallback cannot reuse the configured Cohere relevance threshold. The operator must evaluate a separate local gate.",
+}
+
 
 @dataclass(frozen=True)
 class HostedSettings:
@@ -295,6 +304,8 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
     @app.exception_handler(ProviderOperationError)
     async def provider_unavailable(request, error):
         emit("hosted.provider.unavailable", level=40, error_type=type(error).__name__, failure_reason=error.error_code)
+        if error.error_code in LOCAL_SEARCH_ERRORS:
+            return JSONResponse({"detail": LOCAL_SEARCH_ERRORS[error.error_code], "code": error.error_code}, status_code=503)
         if error.error_code == "quota_exhausted":
             return JSONResponse({"detail": UPLOAD_ERROR_MESSAGES["quota_exhausted"], "code": error.error_code}, status_code=503)
         if error.error_code == "rate_limit":
@@ -510,6 +521,8 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
         def public_error(error):
             emit("hosted.stream.failed", error_type=type(error).__name__)
             if isinstance(error, ProviderOperationError):
+                if error.error_code in LOCAL_SEARCH_ERRORS:
+                    return {"detail":LOCAL_SEARCH_ERRORS[error.error_code], "code":error.error_code}
                 if error.error_code == "quota_exhausted":
                     return {"detail":UPLOAD_ERROR_MESSAGES["quota_exhausted"], "code":error.error_code}
                 if error.error_code == "rate_limit":
@@ -587,7 +600,9 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                 require_answer_permission(True)  # Organization policy, not a browser reviewer flag.
             with backend() as (provider, reranker, vectors):
                 report = retrieve(scoped, vectors, provider, reranker, settings, hosted.tenant,
-                    question, RetrievalOptions(document_id=document, min_rerank_score=hosted.min_rerank_score))
+                    question, RetrievalOptions(document_id=document, min_rerank_score=hosted.min_rerank_score,
+                        local_outage_fallback=os.getenv("GSME_LOCAL_OUTAGE_FALLBACK", "yes") == "yes"),
+                    **({"on_event":on_event} if on_event else {}))
             if cancelled():
                 raise AnswerCancelled()
             answer = generate_answer(question, report,
@@ -622,6 +637,9 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                  fallback_used=answer.get("fallback_used") if answer else None)
             return {"route": "documents", "status": report["status"], "answer": answer,
                     "retrieval_strategy": report.get("strategy", "hybrid"),
+                    "retrieval_fallback_used": report.get("fallback_used", False),
+                    "reranker_model": report.get("reranker_model"),
+                    "local_candidate_limit": report.get("local_candidate_limit"),
                     "question_interpretation": interpretation,
                     "request_id": REQUEST_ID.get(), "answer_sources": sources,
                     "results": report["results"], "schedule_search": None,

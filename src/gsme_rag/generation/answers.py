@@ -602,7 +602,7 @@ def generate_answer(question, retrieval, current, settings=None, primary=None, f
     cache_key = sha256(json.dumps({"scope": cache_scope, "question": question,
         "settings": asdict(settings), "system": SYSTEM, "context": response["context_fingerprint"],
         "warnings": sorted(response["warnings"]),
-        "retrieval": {key: retrieval.get(key) for key in ("embedding_model", "reranker_model", "strategy", "query_mode")},
+        "retrieval": {key: retrieval.get(key) for key in ("embedding_model", "reranker_model", "strategy", "query_mode", "fallback_used")},
         "primary": [primary.name, primary.model]}, sort_keys=True).encode()).hexdigest()
     if cache is not None and audit is None and still_current():
         saved = cache.get(cache_key)
@@ -613,7 +613,12 @@ def generate_answer(question, retrieval, current, settings=None, primary=None, f
             response = {**saved, "cache_hit": True}
             return finish()
 
-    for index, provider in enumerate((primary, fallback)):
+    # Retrieval already observed a provider outage: do not immediately call the
+    # same exhausted account for generation. Citation/access checks still apply.
+    providers = [(1, fallback)] if retrieval.get("fallback_used") else list(enumerate((primary, fallback)))
+    if retrieval.get("fallback_used"):
+        response["warnings"].append("local_retrieval_outage_recovery")
+    for index, provider in providers:
         if cancelled():
             raise AnswerCancelled()
         if not still_current():

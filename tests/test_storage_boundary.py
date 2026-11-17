@@ -271,6 +271,11 @@ class StorageBoundaryTests(TestCase):
         with self.assertRaisesRegex(ValueError, "invalid"):
             index.query("tenant-a", [float("nan"), 0.0, 0.0, 0.0], 5)
         self.assertEqual(len(index.query("tenant-a", [1.0, 0.0, 0.0, 0.0], 5, text="deadline")), 1)
+        self.assertEqual([str(p.id) for p in index.lexical_query("tenant-a", "deadline", 5,
+                         model_version="model-a", point_ids=[point_id])], [point_id])
+        for tenant, model, points in [("tenant-b", "model-a", [point_id]),
+                                       ("tenant-a", "model-b", [point_id]), ("tenant-a", "model-a", [])]:
+            self.assertEqual(index.lexical_query(tenant, "deadline", 5, model_version=model, point_ids=points), [])
         index.delete([point_id])
         self.assertEqual(index.query("tenant-a", [1.0, 0.0, 0.0, 0.0], 5), [])
 

@@ -6,7 +6,7 @@ import os
 import re
 from typing import Protocol
 
-from gsme_rag.storage.providers import ProviderOperationError
+from gsme_rag.storage.providers import ProviderOperationError, CohereEmbeddings
 from gsme_rag.observability import emit
 
 
@@ -107,7 +107,7 @@ class CohereReranker:
             status = getattr(error, "status_code", None)
             emit("rerank.provider.failed", error_type=type(error).__name__, status=status if isinstance(status, int) else None,
                  model=self.model_version)
-            reason = "rate limited; retry later" if status == 429 else "check rerank-model access, API key and network"
-            label = "HTTP " + str(status) if isinstance(status, int) else "no HTTP status; " + type(error).__name__
-            raise ProviderOperationError(f"Cohere reranking failed ({label}); {reason}") from None
+            # Preserve rate/quota classification and Retry-After for recovery;
+            # an HTTP 400 is not an outage and must not become a local retry.
+            raise CohereEmbeddings._failure("reranking", error) from None
         return validate_ranking(ranked, len(documents))

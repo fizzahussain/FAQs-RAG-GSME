@@ -558,6 +558,14 @@ class StorageIntegrationTests(TestCase):
         self.assertEqual(result["reranking_status"], "completed")
         self.assertEqual(result["results"][0]["chunk_id"], first["chunk_id"])
         self.assertIn("text", vectors.client.get_collection(vectors.collection).payload_schema)
+        scope = self.store.retrieval_scope(self.tenant, self.provider.model_version, vectors.collection,
+                                           str(first["document_id"]), None, "synthetic_reviewed_faq.docx")
+        hits = vectors.lexical_query(self.tenant, "deadline", 5,
+                                    model_version=self.provider.model_version, point_ids=scope)
+        self.assertTrue(hits)
+        self.assertTrue(all(str(hit.id) in scope for hit in hits))
+        self.assertEqual(vectors.lexical_query(self.other, "deadline", 5,
+                         model_version=self.provider.model_version, point_ids=scope), [])
         self.assertEqual(retrieve(self.store, vectors, self.provider, FakeReranker(), self.settings,
             self.other, "deadline", options)["status"], "no_eligible_evidence")
         missing = RetrievalOptions(source_file="not-this-source.pdf")

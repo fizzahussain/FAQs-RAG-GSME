@@ -79,6 +79,24 @@ class HostedIdentityTests(TestCase):
 
 
 class HostedResourceTests(TestCase):
+    def test_local_failures_have_safe_actionable_json_and_stream_messages(self):
+        from gsme_rag.hosted.app import LOCAL_SEARCH_ERRORS
+        store = Mock();store.connect.return_value = MagicMock()
+        settings = Settings("unused", "unused", Path("data"))
+        for code, message in LOCAL_SEARCH_ERRORS.items():
+            with self.subTest(code=code), patch("gsme_rag.hosted.app.require_answer_permission",
+                    side_effect=ProviderOperationError("PRIVATE_PROVIDER_DETAILS", error_code=code)):
+                with TestClient(create_hosted_app(settings, store=store, auto_worker=False),
+                                base_url="http://127.0.0.1:8020") as client:
+                    response = client.post("/api/chat", json={"question":"Synthetic source question"})
+                    self.assertEqual(response.status_code, 503)
+                    self.assertEqual(response.json()["detail"], message)
+                    self.assertEqual(response.json()["code"], code)
+                    stream = client.post("/api/chat/stream", json={"question":"Synthetic source question"})
+                    self.assertIn("event: error", stream.text)
+                    self.assertIn(code, stream.text)
+                    self.assertNotIn("PRIVATE_PROVIDER_DETAILS", response.text + stream.text)
+
     def test_clear_stage_question_returns_cited_scopes_through_real_answer_handler(self):
         import json
         store=Mock();store.connect.return_value=MagicMock()
@@ -256,6 +274,49 @@ DB, QDRANT = os.getenv("GSME_TEST_DATABASE_URL", ""), os.getenv("GSME_TEST_QDRAN
 
 @skipUnless(DB and QDRANT and "/gsme_rag_test" in DB, "Requires isolated PostgreSQL/Qdrant")
 class HostedIsolationTests(TestCase):
+    def test_quota_recovery_json_and_stream_keep_public_scope_and_skip_cohere(self):
+        import json
+        from gsme_rag.retrieval import local_fallback
+        from gsme_rag.retrieval.reranking import RankedPassage
+        from tests.test_answer_streaming import StreamFixture, claim
+        self.provider.external = self.reranker.external = True
+        self.provider.encode_tokens = Mock(side_effect=ProviderOperationError("quota", error_code="quota_exhausted"))
+        local = Mock(model_version="ollama-test")
+        def rank(question, documents):
+            self.assertTrue(documents)
+            self.assertNotIn("COBALT_914", str(documents))
+            self.assertNotIn("AMBER_628", str(documents))
+            return [RankedPassage(i, .9) for i in range(len(documents))]
+        local.rank.side_effect = rank
+        draft = {"status":"answered", "claims":[claim("Public synthetic FAQ contact is Example Team.")]}
+        fallback = StreamFixture(lambda: iter([json.dumps(draft)]))
+        fallback.name = "ollama"
+        fallback.generate = Mock(return_value=json.dumps(draft))
+        with patch.dict(local_fallback._cooldowns, {}, clear=True), \
+             patch("gsme_rag.hosted.app.require_answer_permission"), \
+             patch("gsme_rag.retrieval.service.OllamaReranker", return_value=local), \
+             patch("gsme_rag.generation.answers.OllamaAnswers", return_value=fallback), \
+             patch("gsme_rag.generation.answers.CommandAnswers.generate", side_effect=AssertionError("No external answer allowed")):
+            response = self.client.post("/api/chat", json={"question":"Who is the public synthetic FAQ contact?"})
+            self.assertEqual(response.status_code, 200, response.text)
+            body = response.json()
+            self.assertTrue(body["retrieval_fallback_used"])
+            self.assertEqual(body["retrieval_strategy"], "bm25_local_outage")
+            self.assertEqual(body["answer"]["status"], "answered")
+            self.assertEqual(body["answer"]["provider"], "ollama")
+            self.assertEqual(len(body["answer_sources"]), 1)
+            stream = self.client.post("/api/chat/stream", json={"question":"Who is the public synthetic FAQ contact?"})
+            self.assertIn("local_retrieval", stream.text)
+            self.assertIn("event: claim", stream.text)
+            frames = [frame for frame in stream.text.split("\n\n") if frame.startswith("event: done")]
+            final = json.loads(frames[-1].split("data: ", 1)[1])["result"]
+            self.assertEqual(final["answer"]["status"], "answered")
+            self.assertEqual(final["answer"]["citations"], body["answer"]["citations"])
+            self.assertNotIn("COBALT_914", stream.text)
+            self.assertNotIn("AMBER_628", stream.text)
+            self.assertEqual(self.provider.encode_tokens.call_count, 1)
+            self.reranker.rank.assert_not_called()
+
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

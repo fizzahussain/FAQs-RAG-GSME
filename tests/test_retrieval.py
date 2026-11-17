@@ -52,6 +52,84 @@ class MemoryStore:
 
 
 class RetrievalTests(TestCase):
+    def test_local_candidate_limit_is_explicit_and_keeps_requested_top_k(self):
+        from gsme_rag.retrieval import local_fallback
+        self.provider.external = self.reranker.external = True
+        self.provider.encode_tokens = Mock(side_effect=ProviderOperationError("quota", error_code="quota_exhausted"))
+        self.rows.clear()
+        self.rows.update({f"p{i}":source_row(f"Evidence {i}", chunk=f"c{i}") for i in range(30)})
+        self.store.scope = list(self.rows)
+        self.vectors.lexical_query.return_value = [SimpleNamespace(id=point, score=30-i) for i,point in enumerate(self.rows)]
+        local = Mock(model_version="ollama-test")
+        local.rank.side_effect = lambda q, docs: [RankedPassage(i, .8) for i in range(len(docs))]
+        with patch.dict(local_fallback._cooldowns, {}, clear=True), \
+             patch.dict(os.environ, {"GSME_LOCAL_RERANK_CANDIDATES":"10"}), \
+             patch("gsme_rag.retrieval.service.OllamaReranker", return_value=local):
+            result = self.run_query(local_outage_fallback=True)
+            self.assertEqual(result["rerank_input_count"], 10)
+            self.assertEqual(result["local_candidate_limit"], 10)
+            self.assertIn("local_candidate_limit_reduces_recall", result["warnings"])
+            self.assertEqual(len(result["results"]), 5)
+            result = self.run_query(local_outage_fallback=True, top_k=12)
+            self.assertEqual(result["local_candidate_limit"], 12)
+            self.assertEqual(len(result["results"]), 12)
+
+    def test_embedding_quota_uses_authorized_bm25_then_local_reranking(self):
+        from gsme_rag.retrieval import local_fallback
+        self.provider.external = self.reranker.external = True
+        self.provider.encode_tokens = Mock(side_effect=ProviderOperationError("quota", error_code="quota_exhausted"))
+        self.vectors.lexical_query.return_value = [SimpleNamespace(id="p1", score=.8), SimpleNamespace(id="not-authorized", score=1)]
+        local = Mock(model_version="ollama-test")
+        local.rank.return_value = [RankedPassage(0, .9)]
+        with patch.dict(local_fallback._cooldowns, {}, clear=True), patch("gsme_rag.retrieval.service.OllamaReranker", return_value=local):
+            first = self.run_query(local_outage_fallback=True)
+            second = self.run_query(local_outage_fallback=True)
+        self.assertEqual(first["strategy"], "bm25_local_outage")
+        self.assertTrue(first["fallback_used"])
+        self.assertEqual(second["reranker_model"], "ollama-test")
+        self.assertEqual(first["reranking_status"], "completed")
+        self.assertEqual(self.provider.encode_tokens.call_count, 1)
+        self.assertEqual(local.rank.call_args.args[1], [self.rows["p1"]["evidence_text"]])
+        self.assertEqual(self.vectors.lexical_query.call_args.kwargs["point_ids"], self.store.scope)
+        self.vectors.query.assert_not_called()
+
+    def test_rerank_outage_recovers_but_local_failure_and_threshold_fail_closed(self):
+        from gsme_rag.retrieval import local_fallback
+        self.provider.external = self.reranker.external = True
+        self.reranker.rank = Mock(side_effect=ProviderOperationError("quota", error_code="rate_limit"))
+        self.vectors.lexical_query.return_value = self.vectors.query.return_value
+        local = Mock(model_version="ollama-test")
+        local.rank.return_value = [RankedPassage(0, .2), RankedPassage(1, .9)]
+        with patch.dict(local_fallback._cooldowns, {}, clear=True), patch("gsme_rag.retrieval.service.OllamaReranker", return_value=local):
+            result = self.run_query(local_outage_fallback=True)
+            self.assertTrue(result["fallback_used"])
+            self.assertEqual(result["results"][0]["chunk_id"], "chunk-1")
+            with self.assertRaisesRegex(ProviderOperationError, "not calibrated"):
+                self.run_query(local_outage_fallback=True, min_rerank_score=.5)
+            local.rank.side_effect = ProviderOperationError("Ollama offline")
+            with self.assertRaisesRegex(ProviderOperationError, "Ollama offline"):
+                self.run_query(local_outage_fallback=True)
+
+    def test_local_recovery_does_not_bypass_input_errors_or_revocation(self):
+        from gsme_rag.retrieval import local_fallback
+        self.provider.external = self.reranker.external = True
+        self.provider.encode_tokens = Mock(side_effect=ValueError("bad input"))
+        with patch.dict(local_fallback._cooldowns, {}, clear=True), patch("gsme_rag.retrieval.service.OllamaReranker") as factory:
+            with self.assertRaisesRegex(ValueError, "bad input"):
+                self.run_query(local_outage_fallback=True)
+            factory.assert_not_called()
+        self.provider.encode_tokens = Mock(side_effect=ProviderOperationError("quota", error_code="quota_exhausted"))
+        self.vectors.lexical_query.return_value = [SimpleNamespace(id="p1", score=.9)]
+        local = Mock(model_version="ollama-test")
+        def revoke(*args):
+            self.rows.clear()
+            return [RankedPassage(0, .9)]
+        local.rank.side_effect = revoke
+        with patch.dict(local_fallback._cooldowns, {}, clear=True), patch("gsme_rag.retrieval.service.OllamaReranker", return_value=local):
+            result = self.run_query(local_outage_fallback=True)
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["initial_candidates"], [])
+
     def test_comparison_expands_only_current_approved_same_section_prose(self):
         from gsme_rag.retrieval.service import expand_comparison_context, evidence_record
         heading=['Chapter 1','1.4 Fabless vs IDM']
@@ -351,3 +429,97 @@ class RetrievalApiTests(TestCase):
     def test_reranker_error_is_http502_without_fallback(self):
         with patch("gsme_rag.storage.admin.retrieve", side_effect=ProviderOperationError("Reranker failed")):
             self.assertEqual(self.query().status_code, 502)
+
+
+class LocalRerankingTests(TestCase):
+    def setUp(self):
+        from gsme_rag.retrieval.local_fallback import _rank_cache
+        self.cache = _rank_cache
+        reset = patch.dict(_rank_cache, {}, clear=True)
+        reset.start()
+        self.addCleanup(reset.stop)
+
+    def test_cache_contains_scores_only_and_changed_evidence_is_rescored(self):
+        from gsme_rag.retrieval.local_fallback import OllamaReranker
+        with patch("gsme_rag.retrieval.local_fallback.httpx.Client") as factory:
+            client = factory.return_value.__enter__.return_value
+            client.post.return_value = self.response([{"index": 0, "score": .8}])
+            ranker = OllamaReranker()
+            first = ranker.rank("PRIVATE_QUESTION", ["PRIVATE_EVIDENCE"])
+            self.assertEqual(first, ranker.rank("PRIVATE_QUESTION", ["PRIVATE_EVIDENCE"]))
+            self.assertEqual(client.post.call_count, 1)
+            self.assertNotIn("PRIVATE_", repr(self.cache))
+            ranker.rank("PRIVATE_QUESTION", ["Changed evidence"])
+            self.assertEqual(client.post.call_count, 2)
+            from gsme_rag.retrieval import local_fallback as local
+            later = local.time.monotonic() + 121
+            with patch.object(local.time, "monotonic", return_value=later):
+                ranker.rank("PRIVATE_QUESTION", ["PRIVATE_EVIDENCE"])
+            self.assertEqual(client.post.call_count, 3)
+
+    def test_local_only_model_and_connection_timeout_diagnostics(self):
+        import httpx
+        from gsme_rag.retrieval.local_fallback import OllamaReranker
+        for model in ("qwen:cloud", "qwen:CLOUD", "", "model with spaces"):
+            with patch.dict(os.environ, {"GSME_OLLAMA_MODEL": model}), self.assertRaises(ValueError):
+                OllamaReranker()
+        with patch("gsme_rag.retrieval.local_fallback.httpx.Client") as factory:
+            client = factory.return_value.__enter__.return_value
+            for failure, code in [(httpx.ConnectError("private socket details"), "local_ollama_offline"),
+                                   (httpx.ReadTimeout("private timeout details"), "local_ollama_timeout")]:
+                client.post.side_effect = failure
+                with self.assertRaises(ProviderOperationError) as caught:
+                    OllamaReranker().rank("Q", ["Evidence"])
+                self.assertEqual(caught.exception.error_code, code)
+                self.assertNotIn("private", str(caught.exception))
+
+    def response(self, scores, **changes):
+        result = Mock()
+        result.json.return_value = {"done": True, "done_reason": "stop",
+            "message": {"content": json.dumps({"scores": scores})}, **changes}
+        return result
+
+    def test_local_adapter_uses_loopback_whole_passages_and_validates_output(self):
+        from gsme_rag.retrieval.local_fallback import OllamaReranker
+        docs = ["Exact LOT A17; do not rewrite.", "Other evidence."]
+        with patch("gsme_rag.retrieval.local_fallback.httpx.Client") as factory:
+            client = factory.return_value.__enter__.return_value
+            client.post.return_value = self.response([{"index": 1, "score": .1}, {"index": 0, "score": .9}])
+            self.assertEqual(OllamaReranker().rank("Which lot?", docs)[0].index, 0)
+            self.assertFalse(factory.call_args.kwargs["trust_env"])
+            self.assertFalse(factory.call_args.kwargs["follow_redirects"])
+            args, kwargs = client.post.call_args
+            self.assertEqual(args[0], "http://127.0.0.1:11434/api/chat")
+            sent = json.loads(kwargs["json"]["messages"][1]["content"])
+            self.assertEqual([p["text"] for p in sent["passages"]], docs)
+            for scores in [[{"index": 0, "score": .8}],
+                           [{"index": 0, "score": .8}, {"index": 0, "score": .7}],
+                           [{"index": 0, "score": 2}, {"index": 1, "score": .7}],
+                           [{"index": False, "score": .8}, {"index": 1, "score": .7}]]:
+                self.cache.clear()
+                client.post.return_value = self.response(scores)
+                with self.subTest(scores=scores), self.assertRaises(ProviderOperationError):
+                    OllamaReranker().rank("Which lot?", docs)
+            client.post.return_value = self.response([], done=False)
+            with self.assertRaises(ProviderOperationError):
+                OllamaReranker().rank("Which lot?", docs)
+        with self.assertRaisesRegex(ProviderOperationError, "too large"):
+            OllamaReranker().rank("Which lot?", ["a" * 16001])
+
+    def test_batches_preserve_global_ids_and_cooldown_separates_changed_keys(self):
+        from gsme_rag.retrieval import local_fallback as local
+        with patch("gsme_rag.retrieval.local_fallback.httpx.Client") as factory:
+            client = factory.return_value.__enter__.return_value
+            client.post.side_effect = [self.response([{"index": 0, "score": .9}]),
+                                       self.response([{"index": 1, "score": .8}])]
+            self.assertEqual(len(local.OllamaReranker().rank("Q", ["a" * 4000, "b" * 4000])), 2)
+        provider, reranker = SimpleNamespace(model_version="embed"), SimpleNamespace(model_version="rerank")
+        with patch.dict(local._cooldowns, {}, clear=True), patch.dict(os.environ, {"COHERE_API_KEY": "synthetic-old"}):
+            key = local.cooldown_key(provider, reranker)
+            self.assertTrue(local.record_outage(key, ProviderOperationError("quota", error_code="quota_exhausted")))
+            self.assertTrue(local.cooling_down(key))
+            self.assertFalse(local.record_outage("invalid", ProviderOperationError("bad request", retryable=False)))
+            with patch.dict(os.environ, {"COHERE_API_KEY": "synthetic-new"}):
+                self.assertFalse(local.cooling_down(local.cooldown_key(provider, reranker)))
+            with patch.object(local.time, "monotonic", return_value=local.time.monotonic() + 901):
+                self.assertFalse(local.cooling_down(key))

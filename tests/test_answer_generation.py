@@ -37,6 +37,20 @@ def provider(name, value=None, error=None):
 
 
 class AnswerTests(TestCase):
+    def test_retrieval_outage_goes_directly_to_ollama_and_keeps_evidence_checks(self):
+        context = report()
+        context["fallback_used"] = True
+        primary, fallback = provider("cohere"), provider("ollama")
+        result = generate_answer("Who?", context, lambda _: True, primary=primary, fallback=fallback)
+        primary.generate.assert_not_called()
+        fallback.generate.assert_called_once()
+        self.assertEqual(result["status"], "answered")
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual(result["provider"], "ollama")
+        result = generate_answer("Who?", context, lambda _: False, primary=primary, fallback=fallback)
+        self.assertEqual(result["status"], "evidence_changed")
+        self.assertEqual(fallback.generate.call_count, 1)
+
     def test_clear_stage_question_uses_separate_verbatim_source_scopes(self):
         from copy import deepcopy
         question='what are the three main semiconductor manufacturing stages?'

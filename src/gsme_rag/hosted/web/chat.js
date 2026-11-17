@@ -226,6 +226,14 @@ function message(kind, text) {
 
 function answerMessage(result) {
   const box = message("assistant", ""), text = box.querySelector("p"), targets = new Map();
+  if (result.retrieval_fallback_used) {
+    const notice = document.createElement("p");
+    notice.className = "muted";
+    notice.textContent = "Using local recovery while the search provider is unavailable. " +
+      (result.local_candidate_limit ? `Up to ${result.local_candidate_limit} candidates are locally reranked. ` : "") +
+      "Results may differ from the normal service.";
+    box.append(notice);
+  }
   let groups = result.answer_sources || [];
   // Search matches are not citations. Keep them explicitly separate on abstention.
   if (result.answer?.status !== "answered" && result.results?.length) {
@@ -605,7 +613,8 @@ $("ask").onsubmit = async event => {
       if (kind === "status") {
         if (data.notice) { interpretation = data.notice; $("notice").textContent = interpretation; }
         if (!draftClaims.length) pending.querySelector("p").textContent = data.stage === "generating" ?
-          (data.fallback_used ? "Using the local answer service…" : "Writing an evidence-checked reply…") : "Searching your documents…";
+          (data.fallback_used ? "Using the local answer service…" : "Writing an evidence-checked reply…") :
+          data.stage === "local_retrieval" ? "Cohere is unavailable. Searching locally with Ollama…" : "Searching your documents…";
       } else if (kind === "claim") {
         if (data.index !== draftClaims.length || typeof data.text !== "string") throw new Error("Reply fragments arrived out of order.");
         draftClaims.push(data.text); pending.classList.remove("thinking"); pending.classList.add("streaming-draft");

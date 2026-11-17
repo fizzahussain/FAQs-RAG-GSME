@@ -101,6 +101,20 @@ class QdrantEvidence:
             return None
         return vector
 
+    def lexical_query(self, tenant_id, text, limit, *, model_version, point_ids):
+        """Local BM25 recovery using the SAME SQL-authorized indexed point set."""
+        if not self.hybrid:
+            raise ValueError("Lexical recovery requires the BM25 index")
+        if not point_ids or not self.client.collection_exists(self.collection):
+            return []
+        self.ensure_collection()
+        scope = models.Filter(must=[
+            models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id)),
+            models.FieldCondition(key="model_version", match=models.MatchValue(value=model_version)),
+            models.HasIdCondition(has_id=point_ids)])
+        return self.client.query_points(self.collection, query=models.TextQuery(text=text), using="text",
+            query_filter=scope, limit=limit, with_payload=False).points
+
     def query(self, tenant_id: str, vector: list[float], limit: int, *, text: str | None = None,
               model_version: str | None = None, point_ids: list[str] | None = None):
         if (len(vector) != self.dimension or not all(math.isfinite(value) for value in vector)

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import math
+import os
 import re
 import time
 from uuid import UUID, uuid4
@@ -10,6 +11,8 @@ from gsme_rag.observability import REQUEST_ID, emit, operation
 
 from .reranking import validate_ranking
 from .planning import plan_query, fuse_query_hits
+from gsme_rag.storage.providers import ProviderOperationError
+from .local_fallback import OllamaReranker, cooldown_key, cooling_down, record_outage
 
 
 @dataclass(frozen=True)
@@ -23,6 +26,7 @@ class RetrievalOptions:
     context_chars: int = 16000
     min_rerank_score: float | None = None
     query_mode: str = "original"
+    local_outage_fallback: bool = False
 
     def __post_init__(self):
         if not 1 <= self.top_k <= 20 or not self.top_k <= self.candidate_count <= 100:
@@ -57,7 +61,7 @@ def evidence_record(row: dict) -> dict:
 
 
 def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, question: str,
-             options: RetrievalOptions | None = None) -> dict:
+             options: RetrievalOptions | None = None, *, on_event=None) -> dict:
     options = options or RetrievalOptions()
     if not tenant_id.strip() or len(tenant_id) > 120 or not question.strip() or len(question) > 20000:
         raise ValueError("A bounded question and workspace are required")
@@ -102,18 +106,43 @@ def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, quest
          collection=vectors.collection, min_rerank_score=options.min_rerank_score)
     if not scope:
         return finish("no_eligible_evidence")
+    outage_key = cooldown_key(provider, reranker)
+    local_mode = options.local_outage_fallback and provider.external and cooling_down(outage_key)
+    report["fallback_used"] = False
+
+    def use_local(stage, error=None):
+        report["fallback_used"] = True
+        report["warnings"].append("local_outage_recovery_quality_not_cohere_equivalent")
+        emit("retrieval.fallback", stage=stage, backend="ollama", fallback_used=True,
+             failure_reason=error.error_code if error else "provider_cooldown")
+        if on_event:
+            on_event({"type":"status", "stage":"local_retrieval", "backend":"ollama", "fallback_used":True})
+
     phase = time.perf_counter()
     query_vectors = []
-    for variant in plan.variants:
-        if len(provider.encode_tokens(variant)) > settings.max_tokens:
-            raise ValueError("Query exceeds embedding token budget")
-        with operation("retrieval.query_embedding", request_id=report["request_id"], model=provider.model_version):
-            query_vectors.append(provider.embed_query(variant))
+    try:
+        if not local_mode:
+            for variant in plan.variants:
+                if len(provider.encode_tokens(variant)) > settings.max_tokens:
+                    raise ValueError("Query exceeds embedding token budget")
+                with operation("retrieval.query_embedding", request_id=report["request_id"], model=provider.model_version):
+                    query_vectors.append(provider.embed_query(variant))
+    except ProviderOperationError as error:
+        if not (options.local_outage_fallback and provider.external and record_outage(outage_key, error)):
+            raise
+        local_mode = True
+        use_local("query_embedding", error)
     timings["query_embedding"] = round((time.perf_counter() - phase) * 1000, 3)
     phase = time.perf_counter()
     scope_set = set(scope)
     with operation("retrieval.candidate_search", request_id=report["request_id"]):
-        rankings = [vectors.query(tenant_id, query_vector, options.candidate_count,
+        if local_mode:
+            use_local("lexical_candidates")
+            report["strategy"] = "bm25_local_outage"
+            rankings = [vectors.lexical_query(tenant_id, variant, options.candidate_count,
+                         model_version=provider.model_version, point_ids=scope) for variant in plan.variants]
+        else:
+            rankings = [vectors.query(tenant_id, query_vector, options.candidate_count,
                              text=variant if options.strategy == "hybrid" else None,
                              model_version=provider.model_version, point_ids=scope)
                     for query_vector, variant in zip(query_vectors, plan.variants, strict=True)]
@@ -136,13 +165,43 @@ def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, quest
         emit("retrieval.candidates.filtered", request_id=report["request_id"], hits=len(hits), candidates=0)
         return finish("no_candidates")
     phase = time.perf_counter()
+    def bound_local_candidates():
+        if options.min_rerank_score is not None:
+            # Avoid any local inference when the configured gate is known to
+            # be incomparable. Never silently loosen a deployment's threshold.
+            raise ProviderOperationError("Configured Cohere relevance threshold is not calibrated for local reranking",
+                                         error_code="local_threshold_uncalibrated", retryable=False)
+        configured = int(os.getenv("GSME_LOCAL_RERANK_CANDIDATES", "10"))
+        if not 1 <= configured <= 30:
+            raise ValueError("Local candidate limit must be between 1 and 30")
+        limit = max(options.top_k, configured)
+        if len(candidates) > limit:
+            report["warnings"].append("local_candidate_limit_reduces_recall")
+            del candidates[limit:]
+        report["local_candidate_limit"] = limit
+
+    if local_mode:
+        bound_local_candidates()
+    documents = [row["evidence_text"] for _, _, row in candidates]
+    active_reranker = OllamaReranker() if local_mode else reranker
+    try:
+        with operation("retrieval.rerank", request_id=report["request_id"], candidates=len(candidates), model=active_reranker.model_version):
+            ranked = validate_ranking(active_reranker.rank(question, documents), len(candidates))
+    except ProviderOperationError as error:
+        if local_mode or not (options.local_outage_fallback and provider.external and record_outage(outage_key, error)):
+            raise
+        local_mode = True
+        use_local("reranking", error)
+        bound_local_candidates()
+        documents = [row["evidence_text"] for _, _, row in candidates]
+        active_reranker = OllamaReranker()
+        ranked = validate_ranking(active_reranker.rank(question, documents), len(candidates))
+    report["reranker_model"] = active_reranker.model_version
     report["rerank_input_count"] = len(candidates)
-    with operation("retrieval.rerank", request_id=report["request_id"], candidates=len(candidates), model=reranker.model_version):
-        ranked = validate_ranking(reranker.rank(question, [row["evidence_text"] for _, _, row in candidates]), len(candidates))
     timings["reranking"] = round((time.perf_counter() - phase) * 1000, 3)
     report["reranking_status"] = "completed"
     report["candidate_count"] = len(candidates)
-    report["rerank_usage"] = getattr(reranker, "last_usage", {})
+    report["rerank_usage"] = getattr(active_reranker, "last_usage", {})
     phase = time.perf_counter()
 
     # Only same-unit parts can expand a result. Arbitrary neighboring paragraphs
