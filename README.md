@@ -86,23 +86,13 @@ Use the actual `strategy_used` value: a native fallback is not a successful Docl
 ## Models, storage and logs
 
 - Document embeddings: Cohere `embed-v5.0-pro`; query embeddings: `embed-v5.0-fast`; default 1,024 dimensions.
-- Reranking: configured Cohere reranker normally; hosted outage recovery uses a separately labelled Ollama LLM relevance scorer, not an equivalent cross-encoder. Reranking remains required.
-- Answers: configured Cohere Command or optional Gemini adapter; Ollama is the operational answer fallback. Hosted chat also recovers from query-embedding/reranking outages using the existing local BM25 index and Ollama, without changing stored embeddings.
+- Reranking: configured Cohere reranker, required for generated document answers.
+- Answers: configured Cohere Command or optional Gemini adapter; Ollama is an optional operational answer fallback. Changing the answer provider does not remove embedding/reranking dependencies.
 - PostgreSQL owns versions, acceptance/reviews, schedules, jobs and chat history.
 - Qdrant holds the derived vector/text index.
 - `data/` holds originals, normalized artifacts and `logs/console.log`.
 
 Use a reply's **Request details** and request ID to correlate server logs. Quota exhaustion is not repaired by retries, a new upload, or assumed account switching. Keep company-content permissions separate for embedding, reranking, answers and optional vision providers.
-
-### Local outage recovery
-
-Keep `ollama serve` running with the already-installed `GSME_OLLAMA_MODEL` (default `qwen3:4b`). Hosted chat enables `GSME_LOCAL_OUTAGE_FALLBACK=yes` by default; set `no` to retain strict external-only retrieval. No model is downloaded automatically. Keep Ollama itself configured for local-only use.
-
-If Cohere question tokenization/embedding fails, chat searches the existing BM25 index instead. If Cohere reranking fails, Ollama scores only SQL-authorized candidates. Answers then go directly to Ollama, with the same citation/source-access checks. A process-local cooldown avoids further Cohere retrieval calls for at least 60 seconds (15 minutes for exhausted quota/rejected credentials); changing the API key resets that namespace. Logs include `retrieval.fallback`, and replies identify degraded recovery.
-
-This is a reduced-quality availability path, not guaranteed equivalent semantic recall: BM25 can miss paraphrases, small local models can abstain or fail validation, and local CPU inference can be slower. Local reranking is serialized, bounded to 120 seconds and whole-passage batches of at most 6,000 input bytes plus framing. `GSME_LOCAL_RERANK_CANDIDATES=10` bounds local work separately from normal Cohere's 30 candidates (raised to a requested top-k if necessary). The reduced cap is recorded in diagnostics and shown in the recovery notice; lower coverage is not hidden. A 120-second, 32-entry in-memory cache stores only hashes and validated relevance scores; authorization is still checked on every request. No source text or answer is cached by this local rerank cache.
-
-Offline, busy, timeout and invalid-local-ranking errors have distinct operator-actionable messages. Logs include local batch sizes, duration and score-cache hits, never prompts. A configured Cohere score threshold is **not** transferred to incomparable local scores: such deployments fail closed before local inference until a separately calibrated local gate is available. Existing PostgreSQL/Qdrant services, approved indexed evidence, external policy configuration and a working local model are still required. New-document embedding jobs still need Cohere quota; no incompatible local vectors are inserted into the Cohere collection. Schedule lookup remains local and exact.
 
 ## Test and audit
 

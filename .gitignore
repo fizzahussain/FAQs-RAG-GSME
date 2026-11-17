@@ -17,3 +17,7 @@ _deps/
 GSME_RAG_Storage_*.zip
 GSME_Positive_Tests.pdf
 GSME_Negative_Tests.pdf
+# Personal supervisor handover artifacts are kept local, not in the code release.
+GSME_Muse_Project_Documentation.docx
+tools/build_project_documentation.py
+~$*.docx
