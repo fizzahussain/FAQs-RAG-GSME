@@ -16,6 +16,38 @@ from gsme_rag.review import ReviewDecision, ReviewLedger
 
 
 class StorageBoundaryTests(TestCase):
+    def test_successful_token_counts_are_cached_exactly_without_cross_key_reuse(self):
+        from unittest.mock import Mock
+        from uuid import uuid4
+        provider=CohereEmbeddings.__new__(CohereEmbeddings)
+        provider._cache_namespace=uuid4().hex
+        provider.client=Mock()
+        provider.client.tokenize.return_value=SimpleNamespace(tokens=[7,8,9])
+        first=provider.encode_tokens("approved repeated source")
+        first.append(999)  # Callers cannot mutate the saved exact response.
+        self.assertEqual(provider.encode_tokens("approved repeated source"),[7,8,9])
+        self.assertEqual(provider.client.tokenize.call_count,1)
+        provider._cache_namespace=uuid4().hex
+        provider.encode_tokens("approved repeated source")
+        self.assertEqual(provider.client.tokenize.call_count,2)
+
+    def test_failed_token_counts_are_never_cached(self):
+        from unittest.mock import Mock
+        from uuid import uuid4
+        provider=CohereEmbeddings.__new__(CohereEmbeddings)
+        provider._cache_namespace=uuid4().hex
+        provider.client=Mock()
+        class Limited(Exception):
+            status_code=429
+            body={"message":"Trial key limit is 1000 API calls / month"}
+        provider.client.tokenize.side_effect=[Limited(),SimpleNamespace(tokens=[1])]
+        with self.assertRaises(ProviderOperationError) as caught:
+            provider.encode_tokens("synthetic cache failure")
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.error_code,"quota_exhausted")
+        self.assertEqual(provider.encode_tokens("synthetic cache failure"),[1])
+        self.assertEqual(provider.client.tokenize.call_count,2)
+
     def test_provider_rate_limit_preserves_cooldown_without_private_details(self):
         from gsme_rag.storage.providers import provider_retry_delay, ProviderOperationError
 
@@ -120,7 +152,7 @@ class StorageBoundaryTests(TestCase):
         with patch.dict(
             os.environ, {"COHERE_API_KEY": "test", "GSME_EXTERNAL_CONTENT_APPROVED": "no"}
         ):
-            with self.assertRaisesRegex(ValueError, "API key and"):
+            with self.assertRaisesRegex(ValueError, "content approval is missing"):
                 CohereEmbeddings(1024)
 
     def test_cohere_provider_request_shapes_and_safe_errors(self):

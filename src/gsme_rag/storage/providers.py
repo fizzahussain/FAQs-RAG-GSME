@@ -1,12 +1,21 @@
 """Embedding providers for local tests and permitted Cohere calls"""
 
 from hashlib import sha256
+from collections import OrderedDict
 import math
 import os
+import re
 import time
 import httpx
+from threading import Lock
 from gsme_rag.observability import emit
 from typing import Protocol
+
+
+# Exact successful tokenizer responses only. Bounded, process-local, and keyed
+# by hashes so cache keys retain neither source text nor API credentials.
+_TOKEN_CACHE = OrderedDict()
+_TOKEN_CACHE_LOCK = Lock()
 
 
 class EmbeddingProvider(Protocol):
@@ -18,12 +27,23 @@ class EmbeddingProvider(Protocol):
     def embed_query(self, text: str) -> list[float]: ...
 
 
+class ProviderConfigurationError(ValueError):
+    """Operator-actionable setup failure with a safe, stable diagnostic code."""
+
+    def __init__(self, message, *, error_code):
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = False
+
+
 class ProviderOperationError(RuntimeError):
     """Safe provider status that may be shown in a local job error."""
 
-    def __init__(self, message, *, retry_after_seconds=0):
+    def __init__(self, message, *, retry_after_seconds=0, retryable=True, error_code="provider_unavailable"):
         super().__init__(message)
         self.retry_after_seconds = min(3600, max(0, retry_after_seconds))
+        self.retryable = retryable
+        self.error_code = error_code
 
 
 def provider_retry_delay(error):
@@ -86,8 +106,11 @@ class CohereEmbeddings:
     def __init__(self, dimension: int):
         key = os.getenv("COHERE_API_KEY")
         permitted = os.getenv("GSME_EXTERNAL_CONTENT_APPROVED") == "yes"
-        if not key or not permitted:
-            raise ValueError("Cohere requires an API key and GSME_EXTERNAL_CONTENT_APPROVED=yes")
+        if not key or not key.strip():
+            raise ProviderConfigurationError("Cohere API key is missing", error_code="embedding_key_missing")
+        if not permitted:
+            raise ProviderConfigurationError("Cohere content approval is missing",
+                                             error_code="embedding_content_not_approved")
         if dimension not in self.SUPPORTED_DIMENSIONS:
             raise ValueError("Unsupported Cohere Embed 5 dimension")
         import cohere
@@ -95,21 +118,56 @@ class CohereEmbeddings:
         self.client = cohere.ClientV2(api_key=key, timeout=60.0)
         self.dimension = dimension
         self.model_version = embedding_model_version("cohere", dimension)
+        self._cache_namespace = sha256(key.encode()).hexdigest()
 
     def encode_tokens(self, text: str) -> list[int]:
         # The provider tokenizer runs only after the PostgreSQL approval check.
+        namespace = getattr(self, "_cache_namespace", None)
+        cache_key = (namespace, "embed-v5.0-pro", sha256(text.encode()).hexdigest())
+        if namespace:
+            with _TOKEN_CACHE_LOCK:
+                cached = _TOKEN_CACHE.get(cache_key)
+                if cached is not None:
+                    _TOKEN_CACHE.move_to_end(cache_key)
+                    return list(cached)
         for attempt in range(2):
             try:
                 result = self.client.tokenize(text=text, model="embed-v5.0-pro", offline=False,
                                               request_options={"timeout_in_seconds": 30, "max_retries": 0})
-                return list(result.tokens)
+                tokens = list(result.tokens)
+                if namespace and len(tokens) <= 8192:
+                    with _TOKEN_CACHE_LOCK:
+                        _TOKEN_CACHE[cache_key] = tuple(tokens)
+                        _TOKEN_CACHE.move_to_end(cache_key)
+                        while len(_TOKEN_CACHE) > 128:
+                            _TOKEN_CACHE.popitem(last=False)
+                return tokens
             except Exception as error:
                 if isinstance(error, httpx.TransportError) and attempt == 0:
                     emit("tokenizer.transport.retry", error_type=type(error).__name__, model="embed-v5.0-pro")
                     time.sleep(1)
                     continue
-                raise ProviderOperationError(self._safe_error("token count", error),
-                                             retry_after_seconds=provider_retry_delay(error)) from None
+                raise self._failure("token count", error) from None
+
+    @classmethod
+    def _failure(cls, operation, error):
+        status = getattr(error, "status_code", None)
+        # Inspect only provider error text for classification; never log it.
+        body = getattr(error, "body", None)
+        message = str(body.get("message", "")) if isinstance(body, dict) else ""
+        # Cohere's trial response says "1000 API calls / month", not "monthly".
+        # A call quota is separate from the token totals shown in billing views.
+        exhausted = status == 429 and (bool(re.search(r"\bmonth(?:ly)?\b", message.casefold())) or
+            any(term in message.casefold() for term in
+                ("quota exceeded", "quota exhausted", "billing", "credit balance", "trial usage limit")))
+        retryable = (not exhausted and (status == 429 or status in {408,500,502,503,504}
+                                       or isinstance(error, httpx.TransportError)))
+        code = ("quota_exhausted" if exhausted else "rate_limit" if status == 429
+                else "credentials" if status in {401,403} else "provider_unavailable")
+        if status == 429:
+            emit("embedding.provider.limit", backend="cohere", stage=operation, failure_reason=code)
+        return ProviderOperationError(cls._safe_error(operation, error),
+            retry_after_seconds=provider_retry_delay(error), retryable=retryable, error_code=code)
 
     @staticmethod
     def _safe_error(operation: str, error: Exception) -> str:
@@ -143,8 +201,7 @@ class CohereEmbeddings:
                 request_options={"timeout_in_seconds": 60, "max_retries": 0},
             )
         except Exception as error:
-            raise ProviderOperationError(self._safe_error("embedding", error),
-                                         retry_after_seconds=provider_retry_delay(error)) from None
+            raise self._failure("embedding", error) from None
         vectors = response.embeddings.float
         if len(vectors) != len(texts) or any(len(vector) != self.dimension for vector in vectors):
             raise ValueError("Embedding count/dimension mismatch")

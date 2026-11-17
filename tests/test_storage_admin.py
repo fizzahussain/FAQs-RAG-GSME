@@ -22,6 +22,84 @@ ENABLED = bool(DB and QDRANT and "/gsme_rag_test" in DB)
 
 
 class AdminBoundaryTests(TestCase):
+    def test_original_pdf_preview_is_authenticated_hash_checked_and_page_scoped(self):
+        import pymupdf
+        from hashlib import sha256
+        with TemporaryDirectory() as temporary:
+            path=Path(temporary)/'source.pdf'
+            with pymupdf.open() as pdf:
+                pdf.new_page().insert_text((72,100),'First synthetic source page.')
+                pdf.new_page().insert_text((72,100),'Second synthetic source page.')
+                pdf.save(path)
+            version=str(uuid4());record={'version':{'original_path':str(path),'source_sha256':sha256(path.read_bytes()).hexdigest()}}
+            store=Mock();store.inspect_version.side_effect=lambda tenant,*a,**kw:record if tenant=='allowed' else None
+            with patch.dict(os.environ,{'GSME_REVIEW_AUTH_TOKEN':TOKEN}), \
+                 patch('gsme_rag.storage.admin._provider') as provider, \
+                 patch('gsme_rag.parsing.ocr.ocr_image') as ocr:
+                with TestClient(create_admin_app(self.settings,store),base_url='http://127.0.0.1:8010',client=('127.0.0.1',1234)) as client:
+                    headers={'X-GSME-Token':TOKEN};url=f'/api/preview/{version}?tenant=allowed'
+                    self.assertEqual(client.get(url).status_code,401)
+                    for page in [0,2147483648]:self.assertEqual(client.get(url+f'&page={page}',headers=headers).status_code,422)
+                    self.assertEqual(client.get(f'/api/preview/{version}?tenant=other',headers=headers).status_code,404)
+                    self.assertEqual(client.get(url+'&page=3',headers=headers).status_code,404)
+                    result=client.get(url+'&page=2',headers=headers)
+                    self.assertEqual(result.status_code,200)
+                    self.assertTrue(result.content.startswith(b'\x89PNG\r\n\x1a\n'))
+                    self.assertEqual(result.headers['X-Source-Page'],'2')
+                    self.assertEqual(result.headers['X-Source-SHA256'],record['version']['source_sha256'])
+                    self.assertEqual(result.headers['Cache-Control'],'no-store')
+                    with pymupdf.open(stream=result.content,filetype='png') as image:
+                        self.assertLessEqual(max(image[0].rect.width,image[0].rect.height),2000)
+                    path.write_bytes(b'changed original')
+                    self.assertEqual(client.get(url,headers=headers).status_code,409)
+                    record['version']['source_sha256']=sha256(path.read_bytes()).hexdigest()
+                    self.assertEqual(client.get(url,headers=headers).status_code,422)
+                    office=Path(temporary)/'source.docx';office.write_bytes(b'not a PDF')
+                    record['version']['original_path']=str(office)
+                    self.assertEqual(client.get(url,headers=headers).status_code,415)
+                    provider.assert_not_called();ocr.assert_not_called()
+
+    def test_jobs_and_review_filters_are_authenticated_bounded_and_scoped(self):
+        store=Mock();store.list_jobs.return_value=[];store.index_status.return_value=[]
+        store.inspect_version.return_value={"version":{},"chunks":[]}
+        version=str(uuid4())
+        with patch.dict(os.environ,{"GSME_REVIEW_AUTH_TOKEN":TOKEN}), \
+             patch("gsme_rag.storage.admin._provider") as provider:
+            with TestClient(create_admin_app(self.settings,store),base_url="http://127.0.0.1:8010",client=("127.0.0.1",1234)) as client:
+                headers={"X-GSME-Token":TOKEN}
+                self.assertEqual(client.get('/api/jobs?tenant=workspace').status_code,401)
+                self.assertEqual(client.get('/api/jobs?tenant=workspace&limit=101',headers=headers).status_code,422)
+                self.assertEqual(client.get('/api/jobs?tenant=workspace&limit=20',headers=headers).status_code,200)
+                store.list_jobs.assert_called_once_with('workspace',20)
+                for query in ['page=0','page=2147483648','status=anything']:
+                    self.assertEqual(client.get(f'/api/inspect/{version}?tenant=workspace&{query}',headers=headers).status_code,422)
+                response=client.get(f'/api/inspect/{version}?tenant=workspace&status=pending&page=12&limit=10&offset=20',headers=headers)
+                self.assertEqual(response.status_code,200)
+                store.inspect_version.assert_called_once_with('workspace',version,10,20,status='pending',page=12)
+                provider.assert_not_called()
+
+    def test_shared_publication_is_authenticated_explicit_and_version_scoped(self):
+        document, version = str(uuid4()), str(uuid4())
+        store = Mock()
+        store.inspect_version.return_value = {"version": {"document_id": document, "document_class": "schedule"}}
+        body = {"tenant": "local-test", "document_id": document, "version_id": version, "confirm_public": True}
+        with patch.dict(os.environ, {"GSME_REVIEW_AUTH_TOKEN": TOKEN}), \
+             patch("gsme_rag.storage.admin.publish_faq") as share:
+            with TestClient(create_admin_app(self.settings, store), base_url="http://127.0.0.1:8010",
+                            client=("127.0.0.1", 1234)) as client:
+                headers = {"X-GSME-Token": TOKEN}
+                self.assertEqual(client.post("/api/share", json=body).status_code, 401)
+                self.assertEqual(client.post("/api/share", headers=headers,
+                    json={**body, "confirm_public": False}).status_code, 400)
+                self.assertEqual(client.post("/api/share", headers=headers,
+                    json={**body, "document_id": str(uuid4())}).status_code, 404)
+                self.assertEqual(client.post("/api/share", headers={**headers, "Origin": "https://evil.invalid"}, json=body).status_code, 403)
+                share.assert_not_called()
+                response = client.post("/api/share", headers=headers, json=body)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["visibility"], "company_schedule")
+                share.assert_called_once_with(store, "local-test", document, version, schedule=True)
+
     def test_request_vector_clients_close_on_success_and_failures(self):
         tenant, version, document = "t", str(uuid4()), str(uuid4())
         store = Mock()

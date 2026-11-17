@@ -10,7 +10,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from gsme_rag.generation.answers import (
-    AnswerProviderUnavailable, AnswerSettings, CommandAnswers, InvalidAnswer,
+    AnswerCache, AnswerProviderUnavailable, AnswerSettings, CommandAnswers, InvalidAnswer,
     OllamaAnswers, generate_answer, require_answer_permission)
 from gsme_rag.storage.admin import create_admin_app
 from gsme_rag.storage.config import Settings
@@ -37,6 +37,216 @@ def provider(name, value=None, error=None):
 
 
 class AnswerTests(TestCase):
+    def test_clear_stage_question_uses_separate_verbatim_source_scopes(self):
+        from copy import deepcopy
+        question='what are the three main semiconductor manufacturing stages?'
+        context=report();operations=context['results'][0]['context_parts'][0]
+        operations['text']='# Product Flow\n\nManufacturing involves three key stages: fabrication, assembly, and testing.'
+        readiness=deepcopy(operations);readiness.update(chunk_id='c2',text='# Semiconductor Manufacturing Stages\n\nIn chip manufacturing, there are three main stages before a product is ready for the market: Multi-Project Wafer, Engineering Sample, and Mass Production.')
+        context['results'][0]['context_parts'].append(readiness)
+        fallback=provider('ollama')
+        result=generate_answer(question,context,lambda _:True,
+            primary=provider('cohere',{'status':'clarification_needed','claims':[]}),fallback=fallback)
+        self.assertEqual(result['status'],'answered')
+        self.assertEqual(result['answer_protocol'],'verbatim_stage_extracts_v1')
+        self.assertEqual(result['provider'],'source_extracts')
+        self.assertEqual(len(result['claims']),2)
+        self.assertIn('not one combined sequence',result['text'])
+        self.assertIn('fabrication, assembly, and testing',result['text'])
+        self.assertIn('Multi-Project Wafer, Engineering Sample, and Mass Production',result['text'])
+        self.assertEqual({c['chunk_id'] for c in result['citations']},{'c1','c2'})
+        for claim in result['claims']:self.assertIn(claim['text'],claim['supports'][0]['quote'])
+        fallback.generate.assert_not_called()
+        # The recovery copies the list actually supplied, not remembered names.
+        context['results'][0]['context_parts']=[operations]
+        operations['text']='Manufacturing includes three main stages: alpha preparation, beta handling, and gamma inspection.'
+        result=generate_answer(question,context,lambda _:True,primary=provider('cohere',{'status':'clarification_needed','claims':[]}))
+        self.assertEqual(result['status'],'answered');self.assertIn('alpha preparation',result['text'])
+        self.assertNotIn('fabrication',result['text'])
+
+    def test_stage_recovery_does_not_answer_extra_constraints_or_uncertain_evidence(self):
+        from copy import deepcopy
+        question='What are the three main semiconductor manufacturing stages?'
+        context=report();part=context['results'][0]['context_parts'][0]
+        part['text']='Manufacturing includes three main stages: preparation, processing, and inspection.'
+        for q in [question[:-1]+' and their exact costs?',question[:-1]+' at TSMC?',question.replace('three','four'),question.replace('are','are not')]:
+            result=generate_answer(q,context,lambda _:True,primary=provider('cohere',{'status':'clarification_needed','claims':[]}))
+            self.assertEqual(result['status'],'clarification_needed');self.assertEqual(result['claims'],[])
+        for extra in [{'review_required':True},{'evidence_status':'pending'},{'chunk_type':'table_row'},
+                      {'text':'Image text (OCR): '+part['text']},
+                      {'text':'Manufacturing includes three main stages: preparation and inspection.'},
+                      {'text':'Manufacturing does not include three main stages: preparation, processing, and inspection.'}]:
+            suspect=deepcopy(context);suspect['results'][0]['context_parts'][0].update(extra)
+            result=generate_answer(question,suspect,lambda _:True,primary=provider('cohere',{'status':'clarification_needed','claims':[]}))
+            self.assertEqual(result['status'],'clarification_needed');self.assertEqual(result['claims'],[])
+        conflict=deepcopy(part);conflict.update(chunk_id='c2',text='Manufacturing includes three main stages: different preparation, other processing, and inspection.')
+        context['results'][0]['context_parts'].append(conflict)
+        result=generate_answer(question,context,lambda _:True,primary=provider('cohere',{'status':'clarification_needed','claims':[]}))
+        self.assertEqual(result['status'],'clarification_needed')
+
+    def test_stage_recovery_preserves_model_refusal_and_source_revocation(self):
+        context=report();context['results'][0]['context_parts'][0]['text']='Manufacturing involves three key stages: preparation, processing, and inspection.'
+        question='What are the three main semiconductor manufacturing stages?'
+        primary=provider('cohere',{'status':'insufficient_evidence','claims':[]});fallback=provider('ollama')
+        result=generate_answer(question,context,lambda _:True,primary=primary,fallback=fallback)
+        self.assertEqual(result['status'],'insufficient_evidence');fallback.generate.assert_not_called()
+        active=True
+        primary=provider('cohere')
+        def revoked(*args):
+            nonlocal active
+            active=False
+            return json.dumps({'status':'clarification_needed','claims':[]})
+        primary.generate.side_effect=revoked
+        result=generate_answer(question,context,lambda _:active,primary=primary,fallback=fallback)
+        self.assertEqual(result['status'],'evidence_changed');self.assertEqual(result['claims'],[])
+
+    def test_parametric_outputs_cannot_be_attributed_from_generic_wafer_sorting(self):
+        from gsme_rag.generation.answers import Claim, Support, validate_claim
+        sorting = "# Wafer Level Test\n\nMain Outputs: Wafer Map, Test Log, Yield Report, and Bin Summary"
+        parametric = "WAT Report: Lists measured values per parameter with Spec High / Spec Low."
+        sources = {'E1': {'text': sorting}, 'E2': {'text': parametric}}
+        mixed = Claim(text='Parametric testing generates wafer maps and bin summaries.',
+                      supports=[Support(source_id='E1', quote=sorting)])
+        question = 'What are the main outputs of parametric wafer testing?'
+        with self.assertRaisesRegex(InvalidAnswer, 'parametric-specific'):
+            validate_claim(mixed, sources, question)
+        specific = Claim(text='Parametric testing produces WAT reports.',
+                         supports=[Support(source_id='E2', quote=parametric)])
+        validate_claim(specific, sources, question)
+        # Do not ban a sorting answer when that is the actual requested scope.
+        validate_claim(mixed, sources, 'What are the outputs of wafer die sorting?')
+
+    def test_clear_comparison_with_both_definitions_uses_source_sentences_not_vague_clarification(self):
+        from copy import deepcopy
+        source=report();fabless=source['results'][0]['context_parts'][0]
+        fabless['text']='# Fabless vs IDM\n\nFabless semiconductor companies design chips without their own manufacturing facilities. They rely on third-party foundries.'
+        idm=deepcopy(fabless);idm.update(chunk_id='c2',text='# Fabless vs IDM\n\nIn contrast, IDMs own and operate their fabrication facilities. They perform design and manufacturing.')
+        source['results'][0]['context_parts'].append(idm)
+        primary=provider('cohere',{'status':'clarification_needed','claims':[]})
+        result=generate_answer('What is the difference between fabless companies and IDMs?',source,lambda _:True,primary=primary)
+        self.assertEqual(result['status'],'answered')
+        self.assertEqual(result['answer_protocol'],'verbatim_comparison_extracts_v1')
+        self.assertEqual(result['provider'],'source_extracts')
+        self.assertIn('IDMs own and operate',result['text'])
+        self.assertEqual({c['chunk_id'] for c in result['citations']},{'c1','c2'})
+        constrained=generate_answer('Compare fabless and IDM costs in 2030',source,lambda _:True,primary=primary)
+        self.assertEqual(constrained['status'],'clarification_needed')
+
+    def test_fabless_idm_intro_is_not_a_definition_and_idp_requires_clarification(self):
+        intro = '# Chapter 1\n## 1.4 Fabless vs IDM\n\nIn the semiconductor industry, the terms "Fabless" and "Integrated Device Manufacturer (IDM)" represent two distinct business models.'
+        context = report(); context['results'][0]['context_parts'][0]['text'] = intro
+        primary = provider('cohere')
+        for question, status, reason in [
+            ('What is the difference between fabless companies and IDMs?', 'insufficient_evidence','comparison_definition_missing'),
+            ('Fabless vs IDP', 'clarification_needed','ambiguous_semiconductor_acronym')]:
+            result = generate_answer(question, context, lambda _:True, primary=primary)
+            self.assertEqual(result['status'], status)
+            self.assertEqual(result['reason'], reason)
+        primary.generate.assert_not_called()
+
+    def test_idm_claim_must_cite_definition_not_intro_even_if_definition_is_in_context(self):
+        from copy import deepcopy
+        context = report()
+        part = context['results'][0]['context_parts'][0]
+        part['text'] = 'Fabless and Integrated Device Manufacturer (IDM) represent distinct business models.'
+        definition = deepcopy(part); definition.update(chunk_id='c2',text='IDMs own and operate their own semiconductor fabrication facilities.')
+        context['results'][0]['context_parts'].append(definition)
+        fabricated = {'status':'answered','claims':[{'text':'IDMs own their fabrication facilities.',
+                       'supports':[{'quote_id':'E1Q1'}]}]}
+        failed = generate_answer('Fabless vs IDM', context, lambda _:True, primary=provider('cohere',fabricated))
+        self.assertEqual(failed['status'],'answer_validation_failed')
+        fabricated['claims'][0]['supports']=[{'quote_id':'E2Q1'}]
+        good = generate_answer('Fabless vs IDM', context, lambda _:True, primary=provider('cohere',fabricated))
+        self.assertEqual(good['status'],'answered')
+
+    def test_repeat_question_and_reordered_same_evidence_reuse_validated_answer(self):
+        from copy import deepcopy
+        cache=AnswerCache()
+        source=report()
+        extra=deepcopy(source["results"][0])
+        extra["context_parts"][0]["chunk_id"]="c2"
+        source["results"].append(extra)
+        primary=provider("cohere")
+        first=generate_answer("Who?",source,lambda _:True,primary=primary,cache=cache,cache_scope="owner")
+        first["claims"][0]["text"]="Caller mutation must not change cached text"
+        source["results"].reverse()
+        second=generate_answer("Who?",source,lambda _:True,primary=primary,cache=cache,cache_scope="owner")
+        self.assertTrue(second["cache_hit"])
+        self.assertEqual(second["claims"][0]["text"],"Contact Example Team.")
+        self.assertEqual(first["context_fingerprint"],second["context_fingerprint"])
+        self.assertEqual(primary.generate.call_count,1)
+
+    def test_cache_never_releases_revoked_evidence(self):
+        cache=AnswerCache();primary=provider("cohere")
+        generate_answer("Who?",report(),lambda _:True,primary=primary,cache=cache)
+        result=generate_answer("Who?",report(),lambda _:False,primary=primary,cache=cache)
+        self.assertEqual(result["status"],"evidence_changed")
+        self.assertEqual(result["claims"],[])
+        self.assertFalse(result["cache_hit"])
+        self.assertEqual(primary.generate.call_count,1)
+
+    def test_canonical_source_ids_preserve_split_unit_reading_order(self):
+        from copy import deepcopy
+        source=report()
+        first=source["results"][0]["context_parts"][0]
+        first.update(chunk_id="z-first",chunk_index=1,part_index=0)
+        second=deepcopy(first);second.update(chunk_id="a-second",chunk_index=2,part_index=1)
+        source["results"][0]["context_parts"]=[second,first]
+        primary=provider("cohere")
+        generate_answer("Who?",source,lambda _:True,primary=primary)
+        self.assertEqual(primary.generate.call_args.args[1][0]["source_id"],"E1")
+        result=generate_answer("Who?",source,lambda _:True,primary=primary)
+        self.assertEqual(result["citations"][0]["chunk_id"],"z-first")
+
+    def test_cache_isolates_question_owner_model_and_review_snapshot(self):
+        from copy import deepcopy
+        cache=AnswerCache();primary=provider("cohere")
+        def run(question="Who?",scope="alice",source=None):
+            return generate_answer(question,source or report(),lambda _:True,primary=primary,cache=cache,cache_scope=scope)
+        run()
+        self.assertTrue(run()["cache_hit"])
+        self.assertFalse(run(question="Who is not the contact?")["cache_hit"])
+        self.assertFalse(run(scope="bob")["cache_hit"])
+        primary.model="changed-model"
+        self.assertFalse(run()["cache_hit"])
+        for field,value in [("approval_order",2),("version_id","v2"),("source_sha256","b"*64),
+                            ("text",report()["results"][0]["context_parts"][0]["text"]+" Extra source context.")]:
+            changed=deepcopy(report());changed["results"][0]["context_parts"][0][field]=value
+            self.assertFalse(run(source=changed)["cache_hit"])
+
+    def test_cache_rechecks_access_after_lookup_and_does_not_cache_fallback(self):
+        cache=AnswerCache();primary=provider("cohere")
+        generate_answer("Who?",report(),lambda _:True,primary=primary,cache=cache)
+        checks=Mock(side_effect=[True,False])
+        revoked=generate_answer("Who?",report(),checks,primary=primary,cache=cache)
+        self.assertEqual(revoked["status"],"evidence_changed")
+        self.assertEqual(revoked["claims"],[])
+        outage=provider("cohere",error=AnswerProviderUnavailable())
+        for _ in range(2):
+            result=generate_answer("Other question?",report(),lambda _:True,primary=outage,
+                                   fallback=provider("ollama"),cache=cache)
+            self.assertTrue(result["fallback_used"])
+            self.assertFalse(result["cache_hit"])
+        self.assertEqual(outage.generate.call_count,2)
+
+    def test_cache_has_expiry_and_bounded_memory_and_does_not_cache_invalid_answers(self):
+        now=Mock(return_value=0)
+        cache=AnswerCache(ttl=2,max_entries=1,max_bytes=100,clock=now)
+        cache.put("a",{"text":"one"});cache.put("b",{"text":"two"})
+        self.assertIsNone(cache.get("a"))
+        self.assertEqual(cache.get("b"),{"text":"two"})
+        cache.put("huge",{"text":"x"*101})
+        self.assertIsNone(cache.get("huge"))
+        self.assertLessEqual(cache.size,100)
+        now.return_value=3
+        self.assertIsNone(cache.get("b"))
+        primary=provider("cohere",{"status":"answered","claims":[]})
+        invalid_cache=AnswerCache()
+        for _ in range(2):
+            result=generate_answer("Who?",report(),lambda _:True,primary=primary,cache=invalid_cache)
+            self.assertEqual(result["status"],"answer_validation_failed")
+        self.assertEqual(primary.generate.call_count,2)
+
     def test_broad_topic_overview_and_flowchart_sequence_rules_are_explicit(self):
         from gsme_rag.generation.answers import messages_for
         messages = messages_for("about TSMC", [])

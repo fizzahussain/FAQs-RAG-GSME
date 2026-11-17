@@ -21,7 +21,7 @@ from collections import deque
 from contextlib import contextmanager
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, Query
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AfterValidator, StringConstraints
 import psycopg
@@ -41,6 +41,7 @@ from gsme_rag.generation.answers import generate_answer, require_answer_permissi
 from gsme_rag.retrieval.planning import plan_query
 from gsme_rag.retrieval.schedules import ScheduleQuery, search_schedules, ScheduleSnapshotChanged
 from gsme_rag.observability import REQUEST_ID, emit, operation, configure_console_logging
+from gsme_rag.hosted.access import publish_faq
 
 
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
@@ -70,6 +71,13 @@ class VersionRequest(BaseModel):
     version_id: Identifier
     provider: Literal["fake", "cohere"] = "cohere"
     confirm_external: bool = False
+
+
+class SharedVersionRequest(BaseModel):
+    tenant: Tenant
+    document_id: Identifier
+    version_id: Identifier
+    confirm_public: bool = False
 
 
 class BatchReviewRequest(BaseModel):
@@ -259,6 +267,10 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
     def versions(tenant: Tenant, limit: int = Query(default=50, ge=1, le=100)):
         return _safe(lambda: store.list_versions(tenant, limit))
 
+    @app.get("/api/jobs", dependencies=[Depends(authorize)])
+    def jobs(tenant: Tenant, limit: int = Query(default=50, ge=1, le=100)):
+        return _safe(lambda: store.list_jobs(tenant, limit))
+
     @app.get("/api/library", dependencies=[Depends(authorize)])
     def library(tenant: Tenant, provider: Literal["fake", "cohere"] = "cohere"):
         model = embedding_model_version(provider, settings.dimension)
@@ -301,8 +313,11 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
 
     @app.get("/api/inspect/{version_id}", dependencies=[Depends(authorize)])
     def inspect(version_id: Identifier, tenant: Tenant, limit: int = Query(default=50, ge=1, le=100),
-                offset: int = Query(default=0, ge=0)):
-        value = _safe(lambda: store.inspect_version(tenant, version_id, limit, offset))
+                offset: int = Query(default=0, ge=0),
+                status: Literal["pending", "approved", "rejected", "excluded"] | None = None,
+                page: int | None = Query(default=None, ge=1, le=2147483647)):
+        filters = {"status": status, "page": page} if status is not None or page is not None else {}
+        value = _safe(lambda: store.inspect_version(tenant, version_id, limit, offset, **filters))
         if not value:
             raise HTTPException(404, "Version not found for tenant")
         value["index_jobs"] = store.index_status(tenant, version_id)
@@ -346,6 +361,43 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
         if checksum(path) != value["version"]["source_sha256"]:
             raise HTTPException(409, "Original source changed after submission; restore it or submit a new version")
         return FileResponse(path, filename=value["version"]["source_file"])
+
+    @app.get("/api/preview/{version_id}", dependencies=[Depends(authorize)])
+    def preview(version_id: Identifier, tenant: Tenant, page: int = Query(default=1, ge=1, le=2147483647)):
+        """Render the original PDF page locally, without OCR or model output."""
+        import pymupdf
+        value = store.inspect_version(tenant, version_id, 1)
+        if not value:
+            raise HTTPException(404, "Version not found for tenant")
+        source = value["version"]
+        path = Path(source["original_path"])
+        if not path.is_file():
+            raise HTTPException(404, "Original unavailable")
+        if path.suffix.lower() != ".pdf":
+            raise HTTPException(415, "Page preview is available for PDF originals only")
+        if checksum(path) != source["source_sha256"]:
+            raise HTTPException(409, "Original file hash changed")
+        try:
+            document = pymupdf.open(path)
+        except (pymupdf.FileDataError, RuntimeError):
+            raise HTTPException(422, "Original PDF cannot be rendered") from None
+        with document as pdf:
+            if pdf.needs_pass:
+                raise HTTPException(422, "Encrypted PDF cannot be previewed without its password")
+            if page > len(pdf):
+                raise HTTPException(404, "Source page does not exist")
+            original = pdf[page - 1]
+            area = original.rect.width * original.rect.height
+            if not math.isfinite(area) or area <= 0:
+                raise HTTPException(422, "Source page has invalid dimensions")
+            # Bound the derived bitmap; do not create cached copies of originals.
+            scale = min(1.6, 2000 / original.rect.width, 2000 / original.rect.height, (4_000_000 / area) ** .5)
+            if min(original.rect.width * scale, original.rect.height * scale) < 1:
+                raise HTTPException(422, "Source page aspect ratio cannot be previewed safely")
+            pixels = original.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+            content = pixels.tobytes("png")
+        return Response(content, media_type="image/png", headers={"Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff", "X-Source-SHA256": source["source_sha256"], "X-Source-Page": str(page)})
 
     @app.post("/api/submit", dependencies=[Depends(authorize)])
     def submit(file: UploadFile = File(...), tenant: str = Form(...),
@@ -459,6 +511,21 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
                                             model, collection))
         return {"approved_candidates": count, "model_version": model,
                 "collection": collection}
+
+    @app.post("/api/share", dependencies=[Depends(authorize)])
+    def share_version(body: SharedVersionRequest):
+        """Explicit operator publication; an upload never grants public access."""
+        if not body.confirm_public:
+            raise HTTPException(400, "Confirm sharing this exact version with public library readers")
+        item = _safe(lambda: store.inspect_version(body.tenant, body.version_id, 1))
+        if not item or str(item["version"]["document_id"]) != body.document_id:
+            raise HTTPException(404, "Document version not found for tenant")
+        schedule = item["version"]["document_class"] == "schedule"
+        _safe(lambda: publish_faq(store, body.tenant, body.document_id, body.version_id, schedule=schedule))
+        emit("library.version.shared", version_id=body.version_id, kind="schedule" if schedule else "document")
+        return {"version_id": body.version_id, "visibility": "company_schedule" if schedule else "company_faq",
+                "message": "Shared schedule records published; original file stays restricted." if schedule else
+                           "This exact document version and original are now in the shared library."}
 
     @app.post("/api/index", dependencies=[Depends(authorize)])
     def index(body: VersionRequest):

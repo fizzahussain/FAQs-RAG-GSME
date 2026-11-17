@@ -52,6 +52,26 @@ class MemoryStore:
 
 
 class RetrievalTests(TestCase):
+    def test_comparison_expands_only_current_approved_same_section_prose(self):
+        from gsme_rag.retrieval.service import expand_comparison_context, evidence_record
+        heading=['Chapter 1','1.4 Fabless vs IDM']
+        anchor=source_row('Fabless companies outsource manufacturing.',review_required=False,chunk_type='section',heading_path=heading)
+        definition=source_row('IDMs own fabrication facilities.',chunk='definition',review_required=False,
+                              chunk_type='section',heading_path=heading,chunk_index=1,source_page_start=4)
+        held={**definition,'source_chunk_id':'held','review_required':True}
+        wrong={**definition,'source_chunk_id':'wrong','heading_path':['Other section']}
+        revoked={**definition,'source_chunk_id':'revoked'}
+        store=Mock()
+        store.comparison_context.return_value=[held,wrong,revoked,definition]
+        store.is_source_current_approved.side_effect=lambda t,v,c:c!='revoked'
+        record=evidence_record(anchor); record.update(context_complete=True,context_parts=[evidence_record(anchor)])
+        report={'results':[record],'context_characters':len(record['text']),'warnings':[]}
+        expand_comparison_context(store,'workspace','Compare fabless and IDMs',report,16000)
+        self.assertEqual([p['chunk_id'] for p in record['context_parts']],['chunk-1','definition'])
+        self.assertEqual(record['context_parts'][1]['page_start'],4)
+        self.assertEqual(record['context_parts'][1]['context_origin'],'approved_comparison_section_not_vector_hit')
+        self.assertIn('approved_comparison_section_expanded', report['warnings'])
+
     def test_rerank_receives_at_most_requested_candidates_not_whole_corpus(self):
         self.rows.clear()
         for index in range(40):
@@ -97,6 +117,15 @@ class RetrievalTests(TestCase):
         self.assertEqual(self.vectors.query.call_args.kwargs["point_ids"], ["p1", "p2"])
         self.assertEqual(self.store.scope_args[-2:], ("General", "synthetic.docx"))
         self.assertEqual(result["candidate_count"], 2)
+
+    def test_equal_score_hits_have_stable_point_id_tiebreaks(self):
+        hits=[SimpleNamespace(id="p2",score=.8),SimpleNamespace(id="p1",score=.8)]
+        self.vectors.query.return_value=hits
+        first=self.run_query()
+        self.vectors.query.return_value=list(reversed(hits))
+        second=self.run_query()
+        self.assertEqual(first["initial_candidates"],second["initial_candidates"])
+        self.assertEqual(first["results"],second["results"])
 
     def test_empty_scope_avoids_all_query_and_rerank_calls(self):
         self.store.scope = []

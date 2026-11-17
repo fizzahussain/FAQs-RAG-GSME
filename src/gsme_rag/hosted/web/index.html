@@ -10,8 +10,9 @@
 </head>
 <body>
   <dialog id="sidebar" open aria-label="Workspace navigation">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">m</span><div><strong>GSME Muse</strong><span>YOUR KNOWLEDGE WORKSPACE</span></div><button id="close-sidebar" class="icon-button mobile-only" aria-label="Close navigation" type="button">×</button></div>
+    <div class="brand"><span class="brand-mark" aria-hidden="true">Muse</span><div><strong>GSME Muse</strong><span>YOUR KNOWLEDGE WORKSPACE</span></div><button id="close-sidebar" class="icon-button" aria-label="Collapse sidebar" type="button">×</button></div>
     <button id="new-chat" class="new-chat" type="button"><span aria-hidden="true">＋</span> New chat</button>
+    <section class="chat-history" aria-labelledby="history-heading"><h2 id="history-heading">Chats</h2><nav id="chat-list" aria-label="Chat history"></nav><p id="history-empty" class="muted">Your conversations appear here.</p></section>
     <div class="sidebar-section-heading"><h2>Documents <span id="document-count">0</span></h2><button id="refresh" class="icon-button" type="button" aria-label="Refresh documents" title="Refresh documents">↻</button></div>
     <label class="sr-only" for="document-search">Find a document</label><input id="document-search" type="search" placeholder="Find a document…" autocomplete="off">
     <nav id="document-links" aria-label="Open documents"></nav>
@@ -19,17 +20,18 @@
     <button id="sidebar-upload" class="secondary-button" type="button" disabled>＋ Upload document</button>
     <details id="file-panel"><summary>Processing &amp; file details</summary><div id="documents"></div></details>
     <div class="sidebar-footer">
+      <details><summary>Upload &amp; source help</summary><p>Use + beside your message, or Upload document. Processing starts automatically. Wait for “Ready to chat” beside the filename before searching it.</p><p>All files searches your available collection. Choose a filename in Search in only to narrow the search. Click a sidebar filename to open it.</p><p>“Waiting for provider” resumes automatically. “Source review needed” requires the operator to check uncertain extraction; uploading again will not verify it.</p></details>
       <details><summary>About your workspace</summary><p id="workspace-note">Files are opened locally in this app. Questions search approved document evidence independently.</p><p>PDF, Word, Excel, PowerPoint, CSV and images · up to 20 MiB. Accepted text may be sent to configured AI services. Uncertain extraction stays held.</p></details>
       <button id="signin" class="secondary-button" hidden>Company sign-in</button><button id="signout" class="secondary-button" hidden>Sign out</button><div id="googleButton"></div>
       <span class="workspace-label"><span aria-hidden="true">●</span> Document workspace</span>
     </div>
   </dialog>
   <main class="chat-workspace">
-    <header class="chat-header"><div class="header-title"><button id="open-sidebar" class="icon-button mobile-only" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">☰</button><div><strong>Document chat</strong><span>FAQs, manufacturing &amp; more</span></div></div><span class="header-badge">Source-linked answers</span></header>
+    <header class="chat-header"><div class="header-title"><button id="open-sidebar" class="icon-button" type="button" aria-label="Toggle sidebar" aria-controls="sidebar" aria-expanded="true">☰</button><div><strong id="chat-title">Document chat</strong><span>FAQs, manufacturing &amp; more</span></div></div><nav class="workspace-switch" aria-label="Search mode"><button id="mode-chat" type="button" aria-pressed="true">Chat</button><button id="mode-schedules" type="button" aria-pressed="false">Tapeout schedules</button></nav></header>
     <div class="timeline-wrap">
       <div id="conversation-scroll" tabindex="0" aria-label="Scrollable conversation">
         <section id="welcome" class="welcome">
-          <span class="welcome-mark" aria-hidden="true">m</span><span class="eyebrow">MEET YOUR KNOWLEDGE ASSISTANT</span>
+          <span class="welcome-mark" aria-hidden="true">Muse</span><span class="eyebrow">MEET YOUR KNOWLEDGE ASSISTANT</span>
           <h1>A little clarity.<br>A lot less searching.</h1>
           <p>Ask a question. Find the answer in your documents.<br>See exactly where it came from.</p>
           <div class="suggestions" aria-label="Example questions">
@@ -39,17 +41,24 @@
           </div>
         </section>
         <section id="messages" aria-live="polite" aria-label="Conversation"></section>
+        <section id="schedule-workspace" hidden aria-labelledby="schedule-heading">
+          <span class="eyebrow">PLAN WITH SOURCE RECORDS</span><h1 id="schedule-heading">Find your tapeout date.</h1>
+          <p class="muted">Search imported Full and Shared schedules. Dates come from stored source rows, not an AI prediction or a live booking system.</p>
+          <div class="schedule-examples" aria-label="Schedule examples"><button type="button" data-question="Show both schedules">All schedule records</button><button type="button" data-question="Next 3 full tapeout dates">Next Full dates</button><button type="button" data-question='Show shared 28nm schedules flavor "HPC+ RF"'>Shared 28 nm</button></div>
+          <div id="schedule-results" aria-live="polite"></div>
+        </section>
       </div>
       <button id="jump-latest" class="secondary-button" type="button" hidden>Latest messages ↓</button>
     </div>
     <div class="composer-dock">
       <p id="notice" role="status">Opening your workspace…</p>
       <form id="ask">
-        <div class="scope-row"><label for="scope">Search in</label><select id="scope" aria-label="Document scope"><option value="">All files</option></select></div>
+        <div class="scope-row" id="document-scope"><label for="scope">Search in</label><select id="scope" aria-label="Document scope"><option value="">All files</option></select></div>
+        <div id="schedule-options" hidden><div class="scope-row"><label for="schedule-kind">Schedule</label><select id="schedule-kind"><option value="">From my question</option><option value="full">Full</option><option value="shared">Shared</option><option value="both">Both</option></select></div><details class="schedule-filters"><summary>Optional date filters</summary><div class="schedule-filter-fields"><label>Date field<select id="schedule-date-field"><option value="">From my question (tapeout by default)</option><option value="tapeout_date">Tapeout</option><option value="trial_deadline">Trial deadline</option><option value="final_deadline">Final deadline</option><option value="estimated_ship_date">Estimated shipment</option></select></label><label>From<input id="schedule-from" type="date"></label><label>Through<input id="schedule-to" type="date"></label></div></details></div>
         <label class="sr-only" for="question">Your question</label>
-        <div class="composer"><button id="attach" type="button" aria-label="Upload a document" title="Upload a document" disabled>+</button><textarea id="question" rows="1" maxlength="4000" required placeholder="Ask about your documents…"></textarea><button id="send" type="submit" disabled><span>Send</span> <span aria-hidden="true">↑</span></button></div>
+        <div class="composer"><button id="attach" type="button" aria-label="Upload a document" title="Upload a document" disabled>+</button><textarea id="question" rows="1" maxlength="4000" required placeholder="Ask about your documents…"></textarea><button id="stop-reply" type="button" hidden>Stop</button><button id="send" type="submit" disabled><span>Send</span> <span aria-hidden="true">↑</span></button></div>
       </form>
-      <div class="composer-hint"><span>Check the sources. Questions are searched independently.</span><span>Enter to send · Shift+Enter for a new line</span></div>
+      <div class="composer-hint"><span id="search-hint">Check the sources. Questions are searched independently.</span><span>Enter to send · Shift+Enter for a new line</span></div>
     </div>
   </main>
   <form id="upload" hidden><input id="file" type="file" accept=".pdf,.docx,.pptx,.xlsx,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp" aria-label="Choose document" required><button id="upload-submit" disabled>Upload document</button></form>

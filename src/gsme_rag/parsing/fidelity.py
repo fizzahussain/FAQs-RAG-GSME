@@ -10,6 +10,7 @@ import pymupdf as fitz
 
 from gsme_rag.models import EvidenceDiagnostic, ParseWarning
 from gsme_rag.parsing.ocr import OcrUnavailable, ocr_image
+from gsme_rag.text import mask_acronym_expansions
 
 
 _BAD_UNICODE = re.compile(r"[\uFFFD\uE000-\uF8FF\U000F0000-\U000FFFFD\U00100000-\U0010FFFD\x00]")
@@ -21,9 +22,10 @@ _BROKEN_SEQUENCE = re.compile(r"=\s*\(\s*$|[=+−-]\s*$|\(\s*\)|\b(?:nan|undefin
 def _reason(text: str) -> str | None:
     if _BAD_UNICODE.search(text) or _UNMAPPED_CID.search(text):
         return "replacement, private-use, or unmapped Unicode character in selectable text"
-    if _BROKEN_SEQUENCE.search(text.strip()):
+    diagnostic_text = mask_acronym_expansions(text)
+    if _BROKEN_SEQUENCE.search(diagnostic_text.strip()):
         return "incomplete or suspicious technical token sequence"
-    if "=" in text and ("\n" in text or _MATH_SYMBOLS.search(text.replace("=", ""))):
+    if "=" in diagnostic_text and ("\n" in diagnostic_text or _MATH_SYMBOLS.search(diagnostic_text.replace("=", ""))):
         return "mathematical layout or symbol positions need visual verification"
     return None
 

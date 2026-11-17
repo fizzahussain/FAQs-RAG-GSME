@@ -352,10 +352,13 @@ def _run_index(store, vectors, provider, settings, jobs, prepared, started, leas
         emit("index.failed", stage=stage["name"], error_type=type(error).__name__, model=provider.model_version)
         label = _index_error_label(error, stage["name"])
         retry_after = getattr(error, "retry_after_seconds", 0)
+        retryable = getattr(error, "retryable", True)
         for job in jobs:
-            store.index_done(job["id"], job["attempt_count"], error=label, retry_after_seconds=retry_after)
+            store.index_done(job["id"], job["attempt_count"], error=label, retry_after_seconds=retry_after,
+                             retryable=retryable)
         return {"indexed": 0, "embedding_calls": embedding_calls, "failed": len(jobs), "error": label,
-                "retry_after_seconds": retry_after}
+                "retry_after_seconds": retry_after, "retryable": retryable,
+                "error_code": getattr(error, "error_code", "indexing_failed")}
 
 
 def reconcile(store: EvidenceStore, vectors, model_version: str, limit: int = 100) -> int:

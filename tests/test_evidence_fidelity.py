@@ -13,6 +13,21 @@ from gsme_rag.chunking import chunk_markdown
 from gsme_rag.models import DocumentMetadata, ParsedDocument
 from gsme_rag.parsing.docling_pdf import _cell_loss_evidence, _chart_label_evidence, _normalize_document
 from gsme_rag.parsing.fidelity import _reason, inspect_pdf_fidelity
+
+
+class AcronymFidelityTests(unittest.TestCase):
+    def test_exact_wrapped_acronym_definition_is_not_a_formula(self):
+        from gsme_rag.storage.acceptance import clean_text_eligible
+        text = "• TSMC = Taiwan Semiconductor\nManufacturing Company\n• Founded in 1987."
+        self.assertIsNone(_reason(text))
+        self.assertTrue(clean_text_eligible(text, "section", False))
+
+    def test_definitions_do_not_hide_equations_or_damaged_symbols(self):
+        from gsme_rag.storage.acceptance import clean_text_eligible
+        for text in ["DPPM = (", "TSMC = Taiwan Semiconductor Manufacturing Company\nYield = 1 (1 + A D0)n",
+                     "TSMC = Taiwan Semiconductor Manufacturing Company\n\ufffd", "DPPM = Defects Per Million\n"]:
+            with self.subTest(text=text):
+                self.assertFalse(clean_text_eligible(text, "section", False))
 from gsme_rag.parsing.pdf import _Line, _extract_lines, _native_markdown, _recover_sparse_docling_pages
 from gsme_rag.review import ReviewDecision, ReviewLedger, eligible_for_embedding
 

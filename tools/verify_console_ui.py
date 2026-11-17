@@ -23,6 +23,7 @@ from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from playwright.sync_api import sync_playwright, expect
 import uvicorn
+import pymupdf
 
 from gsme_rag.storage.config import from_env
 from gsme_rag.storage.postgres import EvidenceStore
@@ -44,6 +45,7 @@ def main():
     token = "synthetic-browser-token-at-least-20-characters"
     os.environ["GSME_REVIEW_AUTH_TOKEN"] = token
     os.environ["GSME_AUTHORIZED_REVIEWERS"] = "synthetic-browser-reviewer"
+    os.environ["GSME_PDF_BACKEND"] = "native"
     with TemporaryDirectory(prefix="gsme-ui-fixture-") as temporary:
         settings = replace(settings, database_url=test_url, data_dir=Path(temporary) / "store",
                            collection="gsme_ui_" + uuid4().hex[:12])
@@ -101,6 +103,7 @@ def main():
                 page.locator("#tenant").fill(tenant)
                 page.locator("#connect").click()
                 expect(page.locator("#connection")).not_to_have_attribute("open", "", timeout=15000)
+                page.locator("#newUpload").click()
                 page.locator("#file").set_input_files(source)
                 page.get_by_text("Replace a document / parsing tools", exact=True).click()
                 page.locator("#parseOnly").check()
@@ -121,6 +124,9 @@ def main():
                 expect(page.locator("#message")).to_contain_text("Confirm you checked every selected chunk")
                 page.locator("#batchVerified").check()
                 page.locator("#approveSelected").click()
+                expect(page.locator("#chunks > details")).to_have_count(2)
+                page.locator("#reviewStatus").select_option("")
+                expect(page.locator("#chunks > details")).to_have_count(3)
                 expect(page.locator("#chunks > details").first.locator("summary").first).to_contain_text("approved")
                 expect(page.locator("#selectionInfo")).to_have_text("0 selected")
                 expect(page.locator("#batchVerified")).not_to_be_checked()
@@ -163,10 +169,91 @@ def main():
                 page.locator("#submit").click()
                 expect(page.locator("#panel-search")).to_be_visible(timeout=30000)
                 expect(page.locator("#message")).to_contain_text("1 accepted for search; 1 extraction issues held aside")
+                page.locator("#tab-documents").click()
+                selected_document = page.locator("#document").input_value()
+                page.locator("#replaceSelected").click()
+                expect(page.locator("#existingDoc")).to_have_value(selected_document)
+                page.locator("#existingDoc").fill("")
+                page.locator("#confirmShare").locator("..").locator("..").locator("summary").click()
+                expect(page.locator("#shareVersion")).to_be_disabled()
+                page.locator("#confirmShare").check()
+                page.locator("#shareVersion").click()
+                expect(page.locator("#shareSummary")).to_contain_text("now in the shared library")
+                expect(page.locator("#confirmShare")).not_to_be_checked()
+                page.locator("#tab-search").click()
                 page.locator("#retrieve").click()
                 expect(page.locator("#retrievalResults .chunk")).to_have_count(2, timeout=30000)
                 expect(page.locator("#retrievalResults img")).to_have_count(0)
                 page.screenshot(path=str(args.output / "automatic-ingestion-mobile.png"), full_page=True)
+                # Admin review starts with held content, not hundreds of accepted
+                # or excluded passages. Filters are server-side before pagination.
+                page.locator("#tab-jobs").click()
+                expect(page.locator("#jobList .job-card")).to_have_count(2)
+                expect(page.locator("#jobList")).to_contain_text("normal_ingestion.docx")
+                page.locator("#jobList .job-card").first.get_by_role("button", name="Open document", exact=True).click()
+                expect(page.locator("#reviewStatus")).to_have_value("pending")
+                expect(page.locator("#chunks > details")).to_have_count(1)
+                expect(page.locator("#reviewCounts")).to_contain_text("Needs review")
+                page.locator("#source").click()
+                expect(page.locator("#previewHint")).to_contain_text("no native browser preview")
+                expect(page.locator("#originalImage")).to_be_hidden()
+                expect(page.locator("#originalDownload")).to_have_attribute("href", re.compile("^blob:"))
+                page.locator("#reviewStatus").select_option("approved")
+                expect(page.locator("#chunks > details")).to_have_count(1)
+                expect(page.locator("#chunks > details").first.locator("summary").first).to_contain_text("approved")
+                page.locator("#reviewPage").fill("999")
+                page.locator("#reviewPage").press("Tab")
+                expect(page.locator("#chunks > details")).to_have_count(0)
+                expect(page.locator("#chunks")).to_contain_text("No passages match")
+                page.locator("#clearReviewFilters").click()
+                expect(page.locator("#chunks > details")).to_have_count(1)
+                page.set_viewport_size({"width":1440,"height":1000})
+                page.screenshot(path=str(args.output / "admin-review-desktop.png"), full_page=True)
+                page.locator("#tab-documents").click()
+                page.locator("#documentSearch").fill("normal_ingestion")
+                expect(page.locator("#documentList .document-card")).to_have_count(1)
+                page.locator("#documentSearch").fill("")
+                page.locator("#cancelReplacement").click()
+                page.locator("#uploadPanel > summary").click()
+                page.evaluate("window.scrollTo(0,0)")
+                page.screenshot(path=str(args.output / "admin-library-desktop.png"), full_page=True)
+                page.set_viewport_size({"width":390,"height":844})
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.screenshot(path=str(args.output / "admin-library-mobile.png"), full_page=True)
+                # A real local PDF response can be previewed at its source page;
+                # changing version/workspace revokes its blob and clears the frame.
+                pdf_source=Path(temporary)/"synthetic_review_pages.pdf"
+                with pymupdf.open() as pdf:
+                    pdf.new_page().insert_text((72,100),"Synthetic first source page for local review.")
+                    pdf.new_page().insert_text((72,100),"Synthetic second source page with different evidence.")
+                    pdf.save(pdf_source)
+                page.locator("#newUpload").click()
+                if not page.locator("#parseOnly").is_visible():
+                    page.get_by_text("Replace a document / parsing tools", exact=True).click()
+                page.locator("#parseOnly").check()
+                page.locator("#file").set_input_files(pdf_source)
+                page.locator("#submit").click()
+                expect(page.locator("#panel-review")).to_be_visible(timeout=30000)
+                page.locator("#reviewPage").fill("2")
+                page.locator("#reviewPage").press("Tab")
+                expect(page.locator("#chunks > details")).to_have_count(1)
+                expect(page.locator("#chunks")).to_contain_text("second source page")
+                page.locator("#source").click()
+                expect(page.locator("#originalImage")).to_be_visible()
+                expect(page.locator("#previewHint")).to_contain_text("page 2 rendered from the original PDF")
+                page.wait_for_function("document.getElementById('originalImage').naturalWidth > 0")
+                expect(page.locator("#originalImage")).to_have_attribute("src",re.compile(r"^blob:"))
+                page.locator("#chunks .page-group button").click()
+                expect(page.locator("#selectionInfo")).to_have_text("1 selected")
+                page.locator("#reviewStatus").select_option("approved")
+                expect(page.locator("#chunks > details")).to_have_count(0)
+                expect(page.locator("#selectionInfo")).to_have_text("0 selected")
+                expect(page.locator("#batchVerified")).not_to_be_checked()
+                page.locator("#reviewStatus").select_option("pending")
+                expect(page.locator("#chunks > details")).to_have_count(1)
+                page.set_viewport_size({"width":1440,"height":1000})
+                page.evaluate("window.scrollTo(0,0)")
+                page.screenshot(path=str(args.output / "admin-pdf-review-desktop.png"), full_page=True)
                 page.locator("#tab-schedules").click()
                 expect(page.locator("#panel-search")).to_be_hidden()
                 expect(page.locator("#panel-schedules")).to_be_visible()
@@ -176,6 +263,10 @@ def main():
                 page.locator("#tenant").fill("different-workspace")
                 expect(page.locator("#retrieve")).to_be_disabled()
                 expect(page.locator("#retrievalResults")).to_be_empty()
+                expect(page.locator("#jobList")).to_be_empty()
+                expect(page.locator("#originalDownload")).to_be_hidden()
+                expect(page.locator("#originalDownload")).not_to_have_attribute("href", re.compile("^blob:"))
+                expect(page.locator("#originalImage")).not_to_have_attribute("src", re.compile("^blob:"))
                 # The product home has no chunk-review controls or technical tabs.
                 page.goto(base)
                 page.set_viewport_size({"width":1280,"height":900})
@@ -242,6 +333,10 @@ def main():
                     "safe_source_links": "passed", "source_html_inert": "passed", "keyboard_tabs": "passed",
                     "workspace_reset": "passed", "mobile_overflow": "none", "browser_errors": failures,
                     "automatic_ingestion_without_notes": "passed",
+                    "admin_jobs_and_filtered_review": "passed",
+                    "admin_library_and_update_controls": "passed",
+                    "office_preview_is_download_only": "passed",
+                    "pdf_preview_and_page_group_review": "passed",
                     "simplified_product_home": "passed",
                     "generated_answer_safe_rendering": "passed (synthetic response fixture)",
                     "schedule_results_mobile": "passed (synthetic response fixture)",

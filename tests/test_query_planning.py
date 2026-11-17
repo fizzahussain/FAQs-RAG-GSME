@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from gsme_rag.storage.admin import create_admin_app
 from pathlib import Path
 
-from gsme_rag.retrieval.planning import plan_query, fuse_query_hits
+from gsme_rag.retrieval.planning import plan_query, fuse_query_hits, interpret_comparison
 from gsme_rag.retrieval import RetrievalOptions, retrieve
 from gsme_rag.retrieval.reranking import FakeReranker
 from gsme_rag.storage.providers import FakeEmbeddings
@@ -15,6 +15,14 @@ from test_retrieval import MemoryStore, source_row
 
 
 class QueryPlanningTests(TestCase):
+    def test_only_explicit_fabless_idp_comparison_gets_a_disclosed_interpretation(self):
+        result=interpret_comparison('Fabless vs IDP')
+        self.assertEqual(result['search_question'],'Fabless vs IDM')
+        self.assertEqual(result['original_question'],'Fabless vs IDP')
+        self.assertIn('Assuming',result['notice'])
+        for question in ['What is IDP?','Compare IDP with SSO','Compare fabless and IDM','Do not change IDP to IDM for fabless companies']:
+            self.assertIsNone(interpret_comparison(question))
+
     def test_auto_schedule_plans_filters_and_empty_question_is_client_error(self):
         token = "synthetic-planning-token-long"
         store = Mock()

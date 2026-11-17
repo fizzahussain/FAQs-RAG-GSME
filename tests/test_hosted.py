@@ -1,4 +1,5 @@
 import os
+import time
 from dataclasses import replace
 import importlib.util
 from pathlib import Path
@@ -17,7 +18,7 @@ from gsme_rag.retrieval.reranking import FakeReranker
 from gsme_rag.storage.config import Settings
 from gsme_rag.storage.pipeline import process_ingestion, process_index
 from gsme_rag.storage.postgres import EvidenceStore
-from gsme_rag.storage.providers import FakeEmbeddings
+from gsme_rag.storage.providers import FakeEmbeddings, ProviderOperationError, ProviderConfigurationError
 from gsme_rag.storage.vectors import QdrantEvidence
 
 
@@ -78,6 +79,49 @@ class HostedIdentityTests(TestCase):
 
 
 class HostedResourceTests(TestCase):
+    def test_clear_stage_question_returns_cited_scopes_through_real_answer_handler(self):
+        import json
+        store=Mock();store.connect.return_value=MagicMock()
+        settings=Settings('unused','unused',Path('data'))
+        parts=[]
+        for index,(name,text,page) in enumerate([
+            ('operations.pdf','Manufacturing involves three main stages: fabrication, assembly, and testing.',18),
+            ('readiness.pdf','In chip manufacturing, there are three main stages before a product is ready for the market: Multi-Project Wafer, Engineering Sample, and Mass Production.',11)]):
+            parts.append({'version_id':str(uuid4()),'chunk_id':f'stage-{index}','source_file':name,
+                'source_sha256':str(index+1)*64,'page_start':page,'text':text})
+        report={'status':'results','reranking_status':'completed','synthetic':False,
+                'results':[{'context_complete':True,'context_parts':parts}], 'rerank_input_count':2,'timings_ms':{}}
+        primary=Mock();primary.name='cohere';primary.model='synthetic-clarification'
+        primary.generate.return_value=json.dumps({'status':'clarification_needed','claims':[]})
+        with patch('gsme_rag.hosted.app.require_answer_permission'), \
+             patch('gsme_rag.hosted.app.CohereEmbeddings'),patch('gsme_rag.hosted.app.CohereReranker'), \
+             patch('gsme_rag.hosted.app.QdrantEvidence'),patch('gsme_rag.hosted.app.retrieve',return_value=report), \
+             patch('gsme_rag.hosted.access.AccessStore.is_source_current_approved',return_value=True), \
+             patch('gsme_rag.generation.answers.CommandAnswers',return_value=primary):
+            with TestClient(create_hosted_app(settings,store=store),base_url='http://127.0.0.1:8020') as client:
+                response=client.post('/api/chat',json={'question':'what are the three main semiconductor manufacturing stages?'})
+                self.assertEqual(response.status_code,200,response.text)
+                body=response.json();self.assertEqual(body['answer']['status'],'answered')
+                self.assertEqual(body['answer']['answer_protocol'],'verbatim_stage_extracts_v1')
+                self.assertEqual(len(body['answer_sources']),2)
+                self.assertIn('fabrication, assembly, and testing',body['answer']['text'])
+                self.assertIn('not one combined sequence',body['answer']['text'])
+
+    def test_chat_reports_quota_or_cooldown_without_claiming_reranker_failed(self):
+        store=Mock();store.connect.return_value=MagicMock()
+        settings=Settings('unused','unused',Path('data'))
+        for code in ("quota_exhausted","rate_limit"):
+            with self.subTest(code=code), patch('gsme_rag.hosted.app.require_answer_permission',
+                    side_effect=ProviderOperationError("private provider response",error_code=code,retry_after_seconds=75)):
+                with TestClient(create_hosted_app(settings,store=store,auto_worker=False),base_url='http://127.0.0.1:8020') as client:
+                    response=client.post('/api/chat',json={'question':'Synthetic source question'})
+                    self.assertEqual(response.status_code,503)
+                    self.assertEqual(response.json()['code'],code)
+                    self.assertNotIn('private provider response',response.text)
+                    self.assertNotIn('unreranked',response.text)
+                    if code=="rate_limit":self.assertEqual(response.headers['Retry-After'],'75')
+                    else:self.assertIn('quota',response.json()['detail'])
+
     def test_hosted_stage_logs_share_one_request_id_without_prompt_or_token(self):
         from gsme_rag.observability import REQUEST_ID, emit
         from uuid import UUID
@@ -134,7 +178,7 @@ class HostedResourceTests(TestCase):
         with patch("gsme_rag.hosted.app.require_answer_permission"), \
              patch("gsme_rag.hosted.app.CohereEmbeddings"), \
              patch("gsme_rag.hosted.app.CohereReranker"), \
-             patch("gsme_rag.hosted.app.QdrantEvidence"), \
+             patch("gsme_rag.hosted.app.QdrantEvidence") as vectors_mock, \
              patch("gsme_rag.hosted.app.retrieve", return_value=report) as retrieve_mock, \
              patch("gsme_rag.hosted.app.generate_answer", return_value={"status":"insufficient_evidence"}), \
              patch("gsme_rag.hosted.app.search_schedules") as schedules:
@@ -142,9 +186,17 @@ class HostedResourceTests(TestCase):
                 response = client.post("/api/chat", json={"question": "How many days before tapeout are preliminary and final GDS uploads due?"})
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["route"], "documents")
+                self.assertEqual(response.json()["retrieval_strategy"], "hybrid")
                 self.assertEqual(response.json()["answer"]["status"], "no_searchable_documents")
-                self.assertIn("restart", response.json()["answer"]["text"])
+                self.assertIn("upload", response.json()["answer"]["text"])
+                self.assertIn("Ready to chat", response.json()["answer"]["text"])
                 retrieve_mock.assert_called_once()
+                # Hosted chat explicitly uses hybrid even when the legacy CLI
+                # setting is false; checking .env alone misreports this path.
+                self.assertFalse(settings.hybrid_enabled)
+                vectors_mock.assert_called_once_with(settings.qdrant_url, settings.collection,
+                                                     settings.dimension, hybrid=True)
+                self.assertEqual(retrieve_mock.call_args.args[-1].strategy, "hybrid")
                 schedules.assert_not_called()
 
     def test_literal_greeting_needs_neither_source_evidence_nor_model(self):
@@ -241,14 +293,133 @@ class HostedIsolationTests(TestCase):
         finally:
             self.vectors.client.close()
 
-    def guest_client(self, **options):
+    def guest_client(self, auto_worker=None, **options):
         def providers():
             return self.provider, self.reranker, QdrantEvidence(QDRANT, self.settings.collection, 32, hybrid=True)
         hosted = replace(self.hosted, guest_uploads=True, **options)
-        client = TestClient(create_hosted_app(self.settings, hosted, self.store, providers=providers),
+        client = TestClient(create_hosted_app(self.settings, hosted, self.store, providers=providers, auto_worker=auto_worker),
                             base_url=hosted.origin, client=("127.0.0.1", 1234))
         self.addCleanup(client.close)
         return client
+
+    def automatic_upload(self):
+        client = self.guest_client()
+        self.addCleanup(client.app.state.upload_worker_pool.shutdown, wait=True)
+        headers={"X-GSME-Session":"1"}
+        client.post("/api/session",headers=headers)
+        source=Path(self.temp.name)/"automatic.docx"
+        doc=Document();doc.add_paragraph("Synthetic automatic processing evidence.");doc.save(source)
+        response=client.post("/api/upload",headers=headers,files={"file":(source.name,source.read_bytes())})
+        self.assertEqual(response.status_code,200,response.text)
+        return client,response.json()["version_id"]
+
+    def make_upload_due(self, version):
+        with self.store.connect() as db:
+            db.execute("UPDATE ingestion_jobs SET hosted_next_attempt_at=now()-interval '1 second' WHERE version_id=%s",(version,))
+            db.execute("UPDATE index_jobs SET next_attempt_at=now()-interval '1 second' WHERE chunk_id IN (SELECT id FROM evidence_chunks WHERE version_id=%s)",(version,))
+
+    def test_rate_limited_upload_resumes_after_restart_without_browser_retry(self):
+        publish=Mock(wraps=self.store.publish)
+        with patch.object(self.store,"publish",publish):
+            with patch.object(self.provider,"encode_tokens",side_effect=ProviderOperationError(
+                    "Cohere token count HTTP 429",retry_after_seconds=60,error_code="rate_limit")):
+                client,version=self.automatic_upload()
+            status=client.get(f"/api/documents/{version}/status").json()
+            self.assertTrue(status["automatic_processing"])
+            self.assertGreaterEqual(status["retry_after_seconds"],59)
+            self.assertEqual(client.app.state.run_due_uploads(),[])
+            restarted=self.guest_client(auto_worker=True)
+            self.addCleanup(restarted.app.state.upload_worker_pool.shutdown,wait=True)
+            restarted.cookies.update(client.cookies)
+            self.make_upload_due(version)
+            with restarted:
+                deadline=time.monotonic()+25
+                while time.monotonic()<deadline:
+                    final=restarted.get(f"/api/documents/{version}/status").json()
+                    if final.get("state")=="indexed" and not final.get("automatic_processing"):break
+                    time.sleep(.25)
+            self.assertEqual(final["state"],"indexed")
+            self.assertFalse(final["automatic_processing"])
+            self.assertEqual(publish.call_count,1)  # Automatic retry never resets publication/backoff.
+            with self.store.connect() as db:
+                row=db.execute("SELECT attempt_count FROM index_jobs WHERE chunk_id IN (SELECT id FROM evidence_chunks WHERE version_id=%s)",(version,)).fetchone()
+                self.assertEqual(row["attempt_count"],2)
+
+    def test_upload_continues_past_twenty_batch_slice_without_manual_resume(self):
+        with patch("gsme_rag.hosted.app.process_index",return_value={"indexed":1,"failed":0}) as index:
+            client,version=self.automatic_upload()
+            self.assertEqual(index.call_count,20)
+        self.assertTrue(client.get(f"/api/documents/{version}/status").json()["automatic_processing"])
+        self.make_upload_due(version)
+        for future in client.app.state.run_due_uploads():future.result(timeout=30)
+        self.assertEqual(client.get(f"/api/documents/{version}/status").json()["state"],"indexed")
+
+    def test_explicit_exhausted_quota_stops_without_automatic_retry(self):
+        with patch.object(self.provider,"encode_tokens",side_effect=ProviderOperationError(
+                "Provider quota exhausted",retryable=False,error_code="quota_exhausted")) as tokens:
+            client,version=self.automatic_upload()
+            self.make_upload_due(version)
+            self.assertEqual(client.app.state.run_due_uploads(),[])
+            self.assertEqual(tokens.call_count,1)
+        status=client.get(f"/api/documents/{version}/status").json()
+        self.assertFalse(status["automatic_processing"])
+        self.assertEqual(status["processing_error"],"quota_exhausted")
+
+    def test_repeated_rate_limits_stop_after_five_attempts(self):
+        with patch.object(self.provider,"encode_tokens",side_effect=ProviderOperationError(
+                "Cohere HTTP 429",retry_after_seconds=60,error_code="rate_limit")) as tokens:
+            client,version=self.automatic_upload()
+            for _ in range(4):
+                self.make_upload_due(version)
+                for future in client.app.state.run_due_uploads():future.result(timeout=30)
+            status=client.get(f"/api/documents/{version}/status").json()
+            self.assertFalse(status["automatic_processing"])
+            self.assertEqual(status["processing_error"],"retry_exhausted")
+            self.assertEqual(tokens.call_count,5)
+            self.make_upload_due(version)
+            self.assertEqual(client.app.state.run_due_uploads(),[])
+
+    def test_deleting_waiting_upload_cancels_automatic_work(self):
+        with patch.object(self.provider,"encode_tokens",side_effect=ProviderOperationError(
+                "Cohere HTTP 429",retry_after_seconds=60,error_code="rate_limit")):
+            client,version=self.automatic_upload()
+        response=client.delete(f"/api/documents/{version}",headers={"X-GSME-Session":"1"})
+        self.assertEqual(response.status_code,200,response.text)
+        self.make_upload_due(version)
+        self.assertEqual(client.app.state.run_due_uploads(),[])
+        with self.store.connect() as db:
+            self.assertFalse(db.execute("SELECT hosted_auto_process FROM ingestion_jobs WHERE version_id=%s",(version,)).fetchone()["hosted_auto_process"])
+
+    def test_upload_configuration_failure_exposes_actionable_safe_message(self):
+        with patch.object(self.provider,"encode_tokens",side_effect=ProviderConfigurationError(
+                "safe setup error",error_code="embedding_content_not_approved")):
+            client,version=self.automatic_upload()
+        status=client.get(f"/api/documents/{version}/status").json()
+        self.assertFalse(status["automatic_processing"])
+        self.assertEqual(status["processing_error"],"embedding_content_not_approved")
+        self.assertIn("GSME_EXTERNAL_CONTENT_APPROVED=yes",status["processing_message"])
+        self.assertIn("restart",status["processing_message"])
+        row=next(r for r in client.get("/api/documents").json()["documents"] if r["version_id"]==version)
+        self.assertEqual(row["processing_message"],status["processing_message"])
+        self.make_upload_due(version)
+        self.assertEqual(client.app.state.run_due_uploads(),[])
+
+    def test_resume_staged_version_with_existing_jobs_publishes_before_indexing(self):
+        client,version=self.automatic_upload()
+        # A previous bounded/offline run can leave jobs behind without making
+        # this version current. Job existence is not proof of publication.
+        with self.store.connect() as db:
+            db.execute("UPDATE documents SET current_version_id=NULL WHERE current_version_id=%s",(version,))
+            db.execute("UPDATE document_versions SET state='review_needed' WHERE id=%s",(version,))
+            db.execute("UPDATE index_jobs SET state='queued' WHERE chunk_id IN (SELECT id FROM evidence_chunks WHERE version_id=%s)",(version,))
+        with patch.object(self.store,"publish",wraps=self.store.publish) as publish:
+            response=client.post(f"/api/documents/{version}/resume",headers={"X-GSME-Session":"1"})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(publish.call_count,1)
+        final=client.get(f"/api/documents/{version}/status").json()
+        self.assertEqual(final["state"],"indexed")
+        self.assertFalse(final["automatic_processing"])
+        self.assertTrue(self.store.inspect_version(self.tenant,version,1)["version"]["is_current"])
 
     def test_owner_delete_revokes_sources_retry_and_stale_vector_hits(self):
         version = self.alice["version_id"]
@@ -505,6 +676,53 @@ class HostedIsolationTests(TestCase):
         self.assertIsNone(result.json()["results"][0]["source_url"])
         self.assertEqual(self.client.get(f"/api/source/{item['version_id']}").status_code, 404)
         self.assertNotIn("shared_schedules.csv", self.client.get("/api/documents").text)
+
+    def test_uploaded_schedule_owner_search_needs_no_embedding_or_answer_provider(self):
+        source = Path(self.temp.name) / "shared_schedules.csv"
+        source.write_text("technology_nm,flavor,trial_deadline,final_deadline,tapeout_date,estimated_ship_date\n28,HPC+ RF,2026-11-01,2026-11-08,2026-11-15,2027-02-15\n", encoding="utf-8")
+        headers = {"Authorization": "Bearer alice", "X-GSME-Session": "1"}
+        with patch("gsme_rag.hosted.app.CohereEmbeddings", side_effect=AssertionError("No embedding call expected")), \
+             patch("gsme_rag.hosted.app.generate_answer", side_effect=AssertionError("No generation expected")):
+            response = self.client.post("/api/upload", headers=headers,
+                files={"file": (source.name, source.read_bytes())})
+            self.assertEqual(response.status_code, 200, response.text)
+            version = response.json()["version_id"]
+            result = self.client.post("/api/schedules/search", headers=headers,
+                json={"question": 'Show shared 28nm schedules flavor "HPC+ RF"'})
+        self.assertEqual(result.status_code, 200, result.text)
+        row = result.json()["results"][0]
+        self.assertEqual((row["tapeout_date"], row["source_row_number"]), ("2026-11-15", 2))
+        self.assertEqual(row["version_id"], version)
+        self.assertIsNotNone(row["source_url"])
+        self.assertEqual(result.json()["reranking_status"], "not_applicable_exact_sql")
+        for auth in ({}, {"Authorization": "Bearer bob"}):
+            other = self.client.post("/api/schedules/search", headers=auth,
+                json={"question": "Show both schedules"})
+            self.assertEqual(other.json()["total"], 0)
+
+    def test_shared_schedule_replacement_requires_explicit_republication(self):
+        source = Path(self.temp.name) / "shared_schedules.csv"
+        source.write_text("technology_nm,flavor,trial_deadline,final_deadline,tapeout_date,estimated_ship_date\n28,LP,2026-11-01,2026-11-08,2026-11-15,2027-02-15\n", encoding="utf-8")
+        first = self.store.submit(self.tenant, source, self.settings.data_dir)
+        process_ingestion(self.store, self.settings, first["job_id"])
+        publish_faq(self.store, self.tenant, first["document_id"], first["version_id"], schedule=True)
+        query = {"question": "Show shared schedules"}
+        self.assertEqual(self.client.post("/api/schedules/search", json=query).json()["total"], 1)
+        unchanged = self.store.submit(self.tenant, source, self.settings.data_dir, first["document_id"])
+        self.assertTrue(unchanged["no_op"])
+        source.write_text("technology_nm,flavor,trial_deadline,final_deadline,tapeout_date,estimated_ship_date\n65,LP,2026-12-01,2026-12-08,2026-12-15,2027-03-15\n", encoding="utf-8")
+        updated = self.store.submit(self.tenant, source, self.settings.data_dir, first["document_id"])
+        process_ingestion(self.store, self.settings, updated["job_id"])
+        # Publication is pinned to an exact version, not inherited by new bytes.
+        self.assertEqual(self.client.post("/api/schedules/search", json=query).json()["total"], 0)
+        publish_faq(self.store, self.tenant, updated["document_id"], updated["version_id"], schedule=True)
+        current = self.client.post("/api/schedules/search", json=query).json()
+        self.assertEqual(current["total"], 1)
+        self.assertEqual(current["results"][0]["tapeout_date"], "2026-12-15")
+        with self.store.connect() as db:
+            old = db.execute("SELECT state,original_path FROM document_versions WHERE id=%s", (first["version_id"],)).fetchone()
+        self.assertEqual(old["state"], "superseded")
+        self.assertTrue(Path(old["original_path"]).is_file())
 
     def test_revocation_during_generation_removes_answer_and_old_source_extracts(self):
         def revoke(*args, **kwargs):

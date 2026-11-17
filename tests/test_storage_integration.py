@@ -24,6 +24,36 @@ ENABLED = bool(DB and QDRANT and "/gsme_rag_test" in DB)
 
 @skipUnless(ENABLED, "Requires real isolated PostgreSQL and Qdrant services")
 class StorageIntegrationTests(TestCase):
+    def test_review_filters_precede_pagination_and_jobs_stay_in_tenant(self):
+        import pymupdf
+        from unittest.mock import patch
+        source=Path(self.temp.name)/'review-pages.pdf'
+        with pymupdf.open() as pdf:
+            for text in ['First page has source evidence for a synthetic inspection.',
+                         'Second page has different evidence for its own review.']:
+                pdf.new_page().insert_text((72,100),text)
+            pdf.save(source)
+        submitted=self.store.submit(self.tenant,source,self.settings.data_dir)
+        with patch.dict(os.environ,{'GSME_PDF_BACKEND':'native'}):
+            process_ingestion(self.store,self.settings,submitted['job_id'])
+        version=submitted['version_id']
+        all_chunks=self.store.inspect_version(self.tenant,version,100)
+        selected=self.store.inspect_version(self.tenant,version,1,status='pending',page=2)
+        self.assertTrue(selected['chunks'])
+        self.assertEqual(selected['chunks'][0]['source_page_start'],2)
+        self.assertEqual(selected['filtered_chunks'],1)
+        self.assertIsNone(selected['next_offset'])
+        self.assertEqual(selected['total_chunks'],all_chunks['total_chunks'])
+        self.assertEqual(sum(selected['status_counts'].values()),selected['total_chunks'])
+        self.assertEqual(self.store.inspect_version(self.tenant,version,status='approved')['filtered_chunks'],0)
+        self.assertIsNone(self.store.inspect_version(self.other,version,status='pending',page=2))
+        self.assertEqual(self.store.list_jobs(self.other),[])
+        jobs=self.store.list_jobs(self.tenant)
+        self.assertEqual([str(job['version_id']) for job in jobs],[version])
+        self.assertIn('index_states',jobs[0])
+        with self.assertRaises(ValueError):self.store.inspect_version(self.tenant,version,page=0)
+        with self.assertRaises(ValueError):self.store.list_jobs(self.tenant,101)
+
     def test_identical_approved_text_reuses_vectors_without_cross_tenant_reuse(self):
         self._approved_faq()
         initial_calls = self.provider.calls
@@ -280,6 +310,22 @@ class StorageIntegrationTests(TestCase):
         self.assertEqual({r["source_sheet"] for r in result["results"]}, {"full", "shared"})
         self.assertEqual(len({r["record_id"] for r in result["results"]}), 2)
         self.assertEqual({r["source_row_number"] for r in result["results"]}, {2})
+
+    def test_single_kind_workbook_keeps_selected_kind_through_ingestion(self):
+        from openpyxl import Workbook
+        from gsme_rag.retrieval.schedules import ScheduleQuery, search_schedules
+        book = Workbook()
+        book.active.title = "Sheet1"
+        book.active.append(["Tech (nm)", "Flavor", "Trial", "Final", "Tapeout", "Est. Ship"])
+        book.active.append([28, "LP", "2026-10-01", "2026-10-02", "2026-10-03", "2026-11-01"])
+        source = Path(self.temp.name) / "schedule.xlsx"
+        book.save(source)
+        item = self.store.submit(self.tenant, source, self.settings.data_dir, schedule_kind="full")
+        result = process_ingestion(self.store, self.settings, item["job_id"])
+        self.assertEqual(result["schedule_rows"], 1, result)
+        records = search_schedules(self.store, self.tenant, ScheduleQuery(schedule_kind="full"))
+        self.assertEqual(records["total"], 1)
+        self.assertEqual(records["results"][0]["source_sheet"], "Sheet1")
 
     def test_invalid_source_reports_operation_without_content(self):
         source = Path(self.temp.name) / "invalid.docx"

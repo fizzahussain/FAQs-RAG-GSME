@@ -14,7 +14,9 @@ from gsme_rag.parsing.ocr import OcrUnavailable
 
 class ManualGuardrailTests(unittest.TestCase):
     def test_bundled_validation_pdf_without_tesseract_keeps_visual_gap(self):
-        path = Path(__file__).resolve().parents[1] / "examples" / "GSME_Parsing_Validation_0.14.3.pdf"
+        path = Path(os.getenv("GSME_TEST_VALIDATION_PDF", str(Path(__file__).resolve().parents[1] / "examples" / "GSME_Parsing_Validation_0.14.3.pdf")))
+        if not path.is_file():
+            self.skipTest("Set GSME_TEST_VALIDATION_PDF to the original three-page validation PDF")
         with patch.dict(os.environ, {"GSME_PDF_BACKEND": "native"}), patch(
             "gsme_rag.parsing.pdf.ocr_image", side_effect=OcrUnavailable("Tesseract not on PATH")
         ):
@@ -28,7 +30,9 @@ class ManualGuardrailTests(unittest.TestCase):
                             for chunk in result.chunks))
 
     def test_bundled_validation_pdf_end_to_end(self):
-        path = Path(__file__).resolve().parents[1] / "examples" / "GSME_Parsing_Validation_0.14.3.pdf"
+        path = Path(os.getenv("GSME_TEST_VALIDATION_PDF", str(Path(__file__).resolve().parents[1] / "examples" / "GSME_Parsing_Validation_0.14.3.pdf")))
+        if not path.is_file():
+            self.skipTest("Set GSME_TEST_VALIDATION_PDF to the original three-page validation PDF")
         with patch.dict(os.environ, {"GSME_PDF_BACKEND": "native"}), patch(
             "gsme_rag.parsing.pdf.ocr_image", return_value="OCR TEST: YIELD 92 PERCENT"
         ):

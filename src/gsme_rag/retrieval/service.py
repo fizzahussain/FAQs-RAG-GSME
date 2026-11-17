@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import math
+import re
 import time
 from uuid import UUID, uuid4
 from gsme_rag.version import RETRIEVAL_VERSION
@@ -116,7 +117,8 @@ def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, quest
                              text=variant if options.strategy == "hybrid" else None,
                              model_version=provider.model_version, point_ids=scope)
                     for query_vector, variant in zip(query_vectors, plan.variants, strict=True)]
-        rankings = [[hit for hit in ranking if str(hit.id) in scope_set] for ranking in rankings]
+        rankings = [sorted((hit for hit in ranking if str(hit.id) in scope_set),
+                           key=lambda hit: (-float(hit.score), str(hit.id))) for ranking in rankings]
         hits = rankings[0] if len(rankings) == 1 else fuse_query_hits(rankings, options.candidate_count)
     timings["candidate_search"] = round((time.perf_counter() - phase) * 1000, 3)
     hit_ids = [str(hit.id) for hit in hits if str(hit.id) in scope_set]
@@ -213,7 +215,51 @@ def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, quest
     timings["context_and_recheck"] = round((time.perf_counter() - phase) * 1000, 3)
     report["warnings"] = sorted(set(report["warnings"]))
     if report["results"]:
+        phase = time.perf_counter()
+        expand_comparison_context(store, tenant_id, question, report, options.context_chars)
+        timings["comparison_context"] = round((time.perf_counter() - phase) * 1000, 3)
+        report["warnings"] = sorted(set(report["warnings"]))
         return finish("results")
     if not report["initial_candidates"]:
         return finish("evidence_changed_during_retrieval")
     return finish("no_results_after_threshold_or_budget")
+
+
+def expand_comparison_context(store, tenant, question, report, budget):
+    """Bring both sides of one explicit source comparison into bounded context.
+
+    These are source-section siblings, not reranked hits. Keep that distinction
+    in diagnostics and recheck approval/ACL before exposing each sibling.
+    """
+    if not re.search(r"\b(?:compar\w*|difference|versus|vs\.?)\b", question, re.I):
+        return
+    anchor = next((r for r in report["results"][:2] if r.get("context_complete") and
+                   any(re.search(r"\b(?:vs\.?|versus|comparison)\b", h, re.I)
+                       for h in r.get("heading_path") or [])), None)
+    if anchor is None or not hasattr(store, "comparison_context"):
+        return
+    existing = {(p["version_id"], p["chunk_id"]) for r in report["results"] for p in r["context_parts"]}
+    added = 0
+    for row in store.comparison_context(tenant, anchor["version_id"], anchor["chunk_id"]):
+        part = evidence_record(row)
+        if ((part["version_id"], part["chunk_id"]) in existing or part.get("review_required")
+                or part.get("chunk_type") != "section" or row.get("part_count") != 1
+                or part["version_id"] != anchor["version_id"]
+                or part.get("heading_path") != anchor.get("heading_path")
+                or part.get("category") != anchor.get("category")
+                or not store.is_source_current_approved(tenant, part["version_id"], part["chunk_id"])):
+            continue
+        if report["context_characters"] + len(part["text"]) > budget:
+            report["warnings"].append("comparison_context_budget_omitted")
+            continue
+        part["context_origin"] = "approved_comparison_section_not_vector_hit"
+        anchor["context_parts"].append(part)
+        existing.add((part["version_id"], part["chunk_id"]))
+        report["context_characters"] += len(part["text"])
+        added += 1
+        if added == 3:
+            break
+    if added:
+        report["warnings"].append("approved_comparison_section_expanded")
+        emit("retrieval.comparison.expanded", request_id=report.get("request_id"),
+             version_id=anchor["version_id"], chunks=added)

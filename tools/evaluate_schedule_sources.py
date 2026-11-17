@@ -6,7 +6,8 @@ The oracle reads CSV independently of the production schedule parser.
 """
 
 from argparse import ArgumentParser
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from calendar import monthrange
 from hashlib import sha256
 import csv
 import json
@@ -25,6 +26,7 @@ from gsme_rag.storage.admin import create_admin_app
 from gsme_rag.storage.config import from_env
 from gsme_rag.storage.pipeline import process_ingestion
 from gsme_rag.storage.postgres import EvidenceStore
+from gsme_rag.version import __version__
 
 
 def source_date(value):
@@ -48,6 +50,8 @@ def main():
     cli = ArgumentParser(description=__doc__)
     cli.add_argument("--source-dir", type=Path, required=True)
     cli.add_argument("--output", type=Path, default=Path("validation/schedule-acceptance"))
+    cli.add_argument("--as-of", type=date.fromisoformat, default=date(2026, 11, 10),
+                     help="Reference date for reproducible relative-date and open/closed checks")
     args = cli.parse_args()
     started = perf_counter()
     settings = from_env()
@@ -88,31 +92,39 @@ def main():
                                 row_count=ingestion["schedule_rows"], seconds=ingestion["seconds"])
     # Question, independently specified exact field expectations. Calendar is
     # pinned so the same acceptance run remains reproducible next month.
+    # Calculate the independent oracle from the chosen reference date, not from
+    # the query parser under test or stale hard-coded relative-date boundaries.
+    today = args.as_of
+    tomorrow = today + timedelta(days=1)
+    week = today - timedelta(days=today.weekday())
+    next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+    month_end = today.replace(day=monthrange(today.year, today.month)[1])
+    next_month_end = next_month.replace(day=monthrange(next_month.year, next_month.month)[1])
     cases = [
         ("Show shared schedules", "shared", {}),
         ("Show full schedules", "full", {}),
         ("List shared 28nm schedules", "shared", {"technology": 28}),
         ('Shared schedules flavor "HPC+ RF"', "shared", {"flavor": "HPC+ RF"}),
-        ("Next shared tapeout", "shared", {"start": "2026-11-10", "nearest": 1}),
-        ("Next 2 full tapeout dates", "full", {"start": "2026-11-10", "nearest": 2}),
-        ("Shared schedules next month", "shared", {"start": "2026-12-01", "end": "2026-12-31"}),
-        ("Full schedules this month", "full", {"start": "2026-11-01", "end": "2026-11-30"}),
-        ("Shared schedules this week", "shared", {"start": "2026-11-09", "end": "2026-11-15"}),
-        ("Full schedules next week", "full", {"start": "2026-11-16", "end": "2026-11-22"}),
-        ("Full schedules today", "full", {"start": "2026-11-10", "end": "2026-11-10"}),
-        ("Shared schedules tomorrow", "shared", {"start": "2026-11-11", "end": "2026-11-11"}),
-        ("Shared schedules next 30 days", "shared", {"start": "2026-11-10", "end": "2026-12-09"}),
+        ("Next shared tapeout", "shared", {"start": today.isoformat(), "nearest": 1}),
+        ("Next 2 full tapeout dates", "full", {"start": today.isoformat(), "nearest": 2}),
+        ("Shared schedules next month", "shared", {"start": next_month.isoformat(), "end": next_month_end.isoformat()}),
+        ("Full schedules this month", "full", {"start": today.replace(day=1).isoformat(), "end": month_end.isoformat()}),
+        ("Shared schedules this week", "shared", {"start": week.isoformat(), "end": (week + timedelta(days=6)).isoformat()}),
+        ("Full schedules next week", "full", {"start": (week + timedelta(days=7)).isoformat(), "end": (week + timedelta(days=13)).isoformat()}),
+        ("Full schedules today", "full", {"start": today.isoformat(), "end": today.isoformat()}),
+        ("Shared schedules tomorrow", "shared", {"start": tomorrow.isoformat(), "end": tomorrow.isoformat()}),
+        ("Shared schedules next 30 days", "shared", {"start": today.isoformat(), "end": (today + timedelta(days=29)).isoformat()}),
         ("Full schedules after 2026-11-10", "full", {"start": "2026-11-11"}),
         ("Full schedules on or after 2026-11-10", "full", {"start": "2026-11-10"}),
         ("Shared schedules before 2026-11-11", "shared", {"end": "2026-11-10"}),
         ("Shared trial dates between 2026-11-01 and 2026-11-30", "shared", {"field": 2, "start": "2026-11-01", "end": "2026-11-30"}),
         ("Full final deadlines on or before 2026-11-10", "full", {"field": 3, "end": "2026-11-10"}),
-        ("Full estimated ship dates next month", "full", {"field": 5, "start": "2026-12-01", "end": "2026-12-31"}),
+        ("Full estimated ship dates next month", "full", {"field": 5, "start": next_month.isoformat(), "end": next_month_end.isoformat()}),
         ("Shared open schedules", "shared", {"open": True}),
         ("Full closed schedules", "full", {"open": False}),
         ("Shared schedules 999nm", "shared", {"technology": 999}),
     ]
-    report = {"version": "0.18.0", "as_of": "2026-11-10", "external_calls": 0,
+    report = {"version": __version__, "as_of": args.as_of.isoformat(), "external_calls": 0,
               "csv_workbook_exact_values_match": True, "sources": submitted, "cases": []}
     token = "synthetic-local-schedule-acceptance-token"
     with patch.dict(os.environ, {"GSME_REVIEW_AUTH_TOKEN": token}), patch("gsme_rag.storage.admin._provider") as provider:
@@ -127,11 +139,11 @@ def main():
                               ("flavor" not in filters or r[1] == filters["flavor"]) and
                               ("start" not in filters or r[field] >= date.fromisoformat(filters["start"])) and
                               ("end" not in filters or r[field] <= date.fromisoformat(filters["end"])) and
-                              ("open" not in filters or (r[3] >= date(2026, 11, 10)) == filters["open"])]
+                              ("open" not in filters or (r[3] >= args.as_of) == filters["open"])]
                     if filters.get("nearest"):
                         dates = sorted({r[field] for r in oracle})[:filters["nearest"]]
                         oracle = [r for r in oracle if r[field] in dates]
-                    body = dict(tenant=tenant, question=question, as_of="2026-11-10", route="auto",
+                    body = dict(tenant=tenant, question=question, as_of=args.as_of.isoformat(), route="auto",
                                 document_id=submitted[kind if source_label == "csv" else "workbook"]["document_id"])
                     response = client.post("/api/retrieve", headers=headers, json=body)
                     value = response.json()

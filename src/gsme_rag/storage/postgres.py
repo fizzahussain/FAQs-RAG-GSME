@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 from gsme_rag.chunking.chunker import CHUNKER_VERSION
 from gsme_rag.models import MarkdownChunk
 from gsme_rag.storage.files import checksum, save_original, verified_markdown
+from gsme_rag.parsing.limits import validate_office_container
 from gsme_rag.storage.acceptance import CLEAN_TEXT_POLICY, clean_text_eligible, chunk_warning_codes as _chunk_warning_codes
 from gsme_rag.parsing.schedules import resolve_schedule_kind, is_schedule_header, parse_schedule_workbook
 from gsme_rag.version import PARSER_VERSION
@@ -117,6 +118,7 @@ class EvidenceStore:
             raise ValueError("schedule_kind must be full or shared")
         if not source.is_file() or source.is_symlink():
             raise ValueError("Source must be a regular local file")
+        validate_office_container(source)
         is_schedule = False
         if source.suffix.lower() == ".csv":
             with source.open("r", encoding="utf-8-sig", newline="") as incoming:
@@ -238,9 +240,15 @@ class EvidenceStore:
             )
 
     def inspect_version(self, tenant_id: str, version_id: str, limit: int = 50,
-                        offset: int = 0) -> dict | None:
+                        offset: int = 0, *, status: str | None = None,
+                        page: int | None = None) -> dict | None:
         if not 1 <= limit <= 100 or offset < 0:
             raise ValueError("Inspection limit must be between 1 and 100; offset must be nonnegative")
+        if status not in {None, "pending", "approved", "rejected", "excluded"} or (page is not None and not 1 <= page <= 2147483647):
+            raise ValueError("Use a valid evidence status and positive source page")
+        # Filters are applied before pagination, never to just the visible batch.
+        filters = " AND (%s::text IS NULL OR c.evidence_status=%s) AND (%s::int IS NULL OR (c.source_page_start<=%s AND COALESCE(c.source_page_end,c.source_page_start)>=%s))"
+        params = (status, status, page, page, page)
         with self.connect() as db:
             version = db.execute(
                 """SELECT v.id,v.document_id,v.source_file,v.source_sha256,v.state,
@@ -266,16 +274,21 @@ class EvidenceStore:
                 FROM evidence_chunks c LEFT JOIN LATERAL (
                     SELECT decision,source_verified,reviewer,approval_basis FROM review_decisions
                     WHERE chunk_id=c.id ORDER BY decision_order DESC LIMIT 1) r ON true
-                WHERE c.version_id=%s ORDER BY c.chunk_index NULLS LAST,c.created_at,c.id LIMIT %s OFFSET %s""",
-                (version_id, limit, offset),
+                WHERE c.version_id=%s""" + filters + " ORDER BY c.chunk_index NULLS LAST,c.created_at,c.id LIMIT %s OFFSET %s",
+                (version_id, *params, limit, offset),
             ).fetchall()
             total = db.execute("SELECT count(*) AS count FROM evidence_chunks WHERE version_id=%s",
                                (version_id,)).fetchone()["count"]
+            filtered = db.execute("SELECT count(*) AS count FROM evidence_chunks c WHERE c.version_id=%s" + filters,
+                                  (version_id, *params)).fetchone()["count"]
+            counts = db.execute("SELECT evidence_status,count(*) AS count FROM evidence_chunks WHERE version_id=%s GROUP BY evidence_status",
+                                (version_id,)).fetchall()
             for chunk in chunks:
                 chunk["raw_warning_codes"] = chunk["warning_codes"]
                 chunk["warning_codes"] = _review_warning_codes(chunk["evidence_text"], chunk["raw_warning_codes"])
             return {"version": version, "chunks": chunks, "total_chunks": total,
-                    "offset": offset, "next_offset": offset + limit if offset + limit < total else None,
+                    "filtered_chunks": filtered, "status_counts": {row["evidence_status"]: row["count"] for row in counts},
+                    "offset": offset, "next_offset": offset + limit if offset + limit < filtered else None,
                     "review_manifest_path": str(Path(version["artifact_path"]).with_name(
                         "review_manifest.json")) if version["artifact_path"] else None}
 
@@ -297,6 +310,23 @@ class EvidenceStore:
                    WHERE d.tenant_id=%s ORDER BY v.created_at DESC, v.id DESC LIMIT %s""",
                 (tenant_id, limit),
             ).fetchall()
+
+    def list_jobs(self, tenant_id: str, limit: int = 50) -> list[dict]:
+        """Read-only operator queue, scoped before counts and pagination."""
+        if not tenant_id.strip() or not 1 <= limit <= 100:
+            raise ValueError("Tenant and bounded limit are required")
+        with self.connect() as db:
+            return db.execute("""SELECT j.id,j.document_id,j.version_id,j.state,j.attempts,j.last_error,
+                j.hosted_auto_process,j.hosted_error_code,j.hosted_next_attempt_at,
+                v.source_file,v.state AS version_state,
+                (d.current_version_id=v.id) AS is_current,
+                COALESCE((SELECT jsonb_agg(jsonb_build_object('state',s.state,'count',s.n))
+                  FROM (SELECT state,count(*) AS n FROM index_jobs WHERE chunk_id IN
+                    (SELECT id FROM evidence_chunks WHERE version_id=v.id) GROUP BY state) s),'[]'::jsonb) AS index_states
+                FROM ingestion_jobs j JOIN document_versions v ON v.id=j.version_id
+                JOIN documents d ON d.id=j.document_id
+                WHERE j.tenant_id=%s AND d.tenant_id=%s ORDER BY v.created_at DESC,j.id DESC LIMIT %s""",
+                (tenant_id, tenant_id, limit)).fetchall()
 
     def library(self, tenant_id: str, model_version: str, collection: str) -> list[dict]:
         versions = self.list_versions(tenant_id, 100)
@@ -559,7 +589,7 @@ class EvidenceStore:
                     (old,),
                 )
 
-    def accept_clean_text(self, tenant_id: str, version_id: str) -> dict:
+    def accept_clean_text(self, tenant_id: str, version_id: str, source_chunk_ids=None) -> dict:
         """Accept only clean, never-reviewed text; never undo a person's decision."""
         with self.connect() as db:
             version = db.execute("""SELECT v.* FROM document_versions v JOIN documents d ON d.id=v.document_id
@@ -576,6 +606,8 @@ class EvidenceStore:
                 ORDER BY c.id FOR UPDATE OF c""", (version_id,)).fetchall()
             accepted = 0
             for row in rows:
+                if source_chunk_ids is not None and row["source_chunk_id"] not in source_chunk_ids:
+                    continue
                 # Scope legacy page-wide warnings at decision time. Stored
                 # evidence/provenance and prior review decisions stay immutable.
                 codes = _chunk_warning_codes(row["warning_codes"], row["chunk_type"], row["review_required"])
@@ -861,6 +893,25 @@ class EvidenceStore:
                 ORDER BY c.part_index LIMIT 20""",
                 (tenant_id, version_id, unit_id, model_version, collection_name)).fetchall()
             return [str(row["point_id"]) for row in rows]
+
+    def comparison_context(self, tenant_id, version_id, source_chunk_id):
+        """Approved prose in the retrieved comparison section, not a new vector hit.
+
+        A page break must not hide the other half of a comparison. The indexed
+        anchor stays mandatory; contextual prose needs current approval, but no
+        separate embedding. Tables, held evidence and distant sections stay out.
+        """
+        with self.connect() as db:
+            return db.execute("""SELECT c.* FROM approved_current_evidence c
+                JOIN approved_current_evidence anchor ON anchor.version_id=c.version_id
+                  AND anchor.heading_path=c.heading_path AND anchor.tenant_id=c.tenant_id
+                WHERE anchor.tenant_id=%s AND anchor.version_id=%s AND anchor.source_chunk_id=%s
+                  AND c.chunk_type='section' AND NOT c.review_required AND c.part_count=1
+                  AND c.chunk_index BETWEEN anchor.chunk_index-6 AND anchor.chunk_index+6
+                  AND c.source_page_start BETWEEN anchor.source_page_start-1 AND anchor.source_page_start+1
+                  AND c.source_chunk_id<>anchor.source_chunk_id
+                ORDER BY abs(c.chunk_index-anchor.chunk_index),c.chunk_index LIMIT 6""",
+                (tenant_id, version_id, source_chunk_id)).fetchall()
 
     def has_indexed_evidence(self, tenant_id: str, model_version: str, collection_name: str) -> bool:
         with self.connect() as db:

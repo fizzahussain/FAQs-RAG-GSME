@@ -17,6 +17,22 @@ EXPANSIONS = {
 }
 
 
+def interpret_comparison(question):
+    """An explicit, narrow acronym interpretation; never an invisible correction.
+
+    IDP is not declared a synonym for IDM. Only the demonstrated fabless
+    comparison gets a conditional IDM interpretation, preserved in the reply.
+    Other identifiers, numbers, negation and technical text stay unchanged.
+    """
+    if (re.search(r"\bfabless\b", question, re.I) and re.search(r"\bIDPs?\b", question, re.I)
+            and re.search(r"\b(?:vs\.?|versus|difference|compar\w*)\b", question, re.I)
+            and not re.search(r"\bIDMs?\b", question, re.I)):
+        return {"original_question":question, "search_question":re.sub(r"\bIDPs?\b", "IDM", question, flags=re.I),
+                "notice":"Assuming you mean IDM (Integrated Device Manufacturer) by ‘IDP’. If you meant a different term, please spell it out.",
+                "reason":"explicit_fabless_idm_interpretation"}
+    return None
+
+
 @dataclass(frozen=True)
 class QueryPlan:
     route: str

@@ -1,114 +1,95 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>GSME Muse · Evidence workspace</title>
-  <link rel="stylesheet" href="/assets/console.css?v=0.16.4">
-  <script defer src="/assets/evidence.js?v=0.16.4"></script>
-  <script defer src="/assets/console.js?v=0.16.4"></script>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Muse · Admin workspace</title>
+<link rel="stylesheet" href="/assets/console.css?v=0.19.10">
+<script defer src="/assets/evidence.js?v=0.19.10"></script>
+<script defer src="/assets/console.js?v=0.19.10"></script>
 </head>
 <body>
-<header class="app-header">
-  <div><span class="eyebrow">GSME MUSE</span><h1>Advanced administration</h1><p class="muted"><a href="/">Back to source search</a> · Technical controls and exception review.</p></div>
-  <div class="mode-picker"><label for="provider">Working mode</label><select id="provider"><option value="fake">Local demo — no external calls</option><option value="cohere">Cohere — real embeddings &amp; reranking</option></select></div>
-</header>
-<div id="message" role="status" aria-live="polite">Connect to get started.</div>
-<details id="connection" class="connection" open>
-  <summary>Connection &amp; workspace <span id="connectionState">Not connected</span></summary>
-  <div class="grid">
-    <div><label for="token">Local access token from .env</label><input id="token" type="password" autocomplete="off"></div>
-    <div><label for="tenant">Workspace (tenant)</label><input id="tenant" value="local-test"></div>
-    <div><label for="reviewer">Reviewer name from .env</label><input id="reviewer" placeholder="For example HP"></div>
-  </div>
-  <button id="connect">Connect</button>
-  <details><summary>Connection details &amp; logs</summary><p class="muted">Use your local token from .env. A reviewer is only needed for manual exceptions. Restart after changing .env. Stage logs also appear in PowerShell and data/logs/console.log.</p><pre id="health"></pre>
-    <label for="logRequestId">Request ID (optional, from chatbot Request details)</label><input id="logRequestId" placeholder="Paste request ID to trace one question">
-    <button id="showLogs" class="secondary">Show operation logs</button><pre id="operationLogs"></pre></details>
-</details>
-<nav class="tabs" role="tablist" aria-label="Workspace screens">
-  <button id="tab-documents" role="tab" aria-selected="true" aria-controls="panel-documents" data-screen="documents">Documents</button>
-  <button id="tab-review" role="tab" aria-selected="false" aria-controls="panel-review" data-screen="review" tabindex="-1">Review &amp; index</button>
-  <button id="tab-search" role="tab" aria-selected="false" aria-controls="panel-search" data-screen="search" tabindex="-1">Ask sources</button>
-  <button id="tab-schedules" role="tab" aria-selected="false" aria-controls="panel-schedules" data-screen="schedules" tabindex="-1">Schedules</button>
+<a class="skip-link" href="#workspace">Skip to workspace</a>
+<div class="admin-shell">
+<aside class="admin-sidebar">
+<a class="brand" href="/admin"><strong>Muse<span>.</span></strong><span>ADMIN WORKSPACE</span></a>
+<nav class="tabs" role="tablist" aria-label="Admin tasks" aria-orientation="vertical">
+<button id="tab-documents" role="tab" aria-selected="true" aria-controls="panel-documents" data-screen="documents">Documents <span>Upload &amp; update</span></button>
+<button id="tab-review" role="tab" aria-selected="false" aria-controls="panel-review" data-screen="review" tabindex="-1">Source review <span>Check held passages</span></button>
+<button id="tab-jobs" role="tab" aria-selected="false" aria-controls="panel-jobs" data-screen="jobs" tabindex="-1">Jobs &amp; logs <span>Track processing</span></button>
+<button id="tab-search" role="tab" aria-selected="false" aria-controls="panel-search" data-screen="search" tabindex="-1">Test search <span>Inspect retrieval &amp; ranks</span></button>
+<button id="tab-schedules" role="tab" aria-selected="false" aria-controls="panel-schedules" data-screen="schedules" tabindex="-1">Schedules <span>Check exact rows</span></button>
 </nav>
+<div class="sidebar-help"><p>One place to manage your sources.</p><a href="/docs" target="_blank" rel="noopener">API reference · FastAPI ↗</a><a href="/">Source-search screen ↗</a><small>Local operator access only</small></div>
+</aside>
+<div class="workspace" id="workspace" tabindex="-1">
+<header class="app-header"><div><span class="eyebrow">GSME MUSE / ADMIN</span><h1 id="screenTitle">Document library</h1><p class="muted" id="screenDescription">Add sources, update existing documents, and choose what to share.</p></div><span class="badge" id="modeState">Local demo</span></header>
+<div id="message" role="status" aria-live="polite">Connect to your workspace to get started.</div>
+<details id="connection" class="connection" open>
+<summary>Workspace connection <span id="connectionState">Not connected</span></summary>
+<p class="muted">Enter your local operator token from .env. It stays in this tab and is never saved in browser storage.</p>
+<div class="grid">
+<div><label for="token">Operator token</label><input id="token" type="password" autocomplete="off"></div>
+<div><label for="tenant">Workspace</label><input id="tenant" value="local-test"></div>
+<div><label for="reviewer">Reviewer name</label><input id="reviewer" placeholder="Your authorized reviewer name"></div>
+<div><label for="provider">Processing mode</label><select id="provider"><option value="fake">Local demo · synthetic vectors</option><option value="cohere">Cohere · real embeddings &amp; reranking</option></select></div>
+</div>
+<button id="connect">Connect workspace</button>
+<details><summary>Service details</summary><p class="muted">Restart the server after changing .env. Reviewer identity is needed only for manual decisions.</p><pre id="health"></pre></details>
+</details>
 <main>
 <section id="panel-documents" role="tabpanel" aria-labelledby="tab-documents">
-  <h2>Your documents</h2>
-  <p class="muted">Upload a file and ingest it. Clean text is indexed automatically; only extraction problems are held aside. No review notes needed for ordinary text.</p>
-  <div class="grid">
-    <div><label for="file">DOCX, PPTX, XLSX, PDF, CSV, or image</label><input id="file" type="file" accept=".docx,.pptx,.xlsx,.pdf,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp"></div>
-    <div><label for="schedule">Schedule CSV type (other files: leave automatic)</label><select id="schedule"><option value="">Automatic</option><option value="full">Full</option><option value="shared">Shared</option></select></div>
-  </div>
-  <details><summary>Replace a document / parsing tools</summary><label for="existingDoc">Existing document ID (optional)</label><input id="existingDoc">
-    <label><input id="parseOnly" type="checkbox"> Parse only (advanced manual-review workflow)</label>
-    <button id="ingest" class="secondary">Resume parse</button><button id="jobStatus" class="secondary">Check job</button><button id="retry" class="secondary">Retry failed parse</button></details>
-  <label id="uploadPermission"><input id="uploadExternal" type="checkbox"> Permit this document's accepted text to be sent to Cohere for embedding</label>
-  <button id="submit">Ingest document</button><p id="ingestSummary" role="status"></p>
-  <hr><div class="section-heading"><h3>Open an existing document</h3><button id="versions" class="secondary">Refresh</button></div>
-  <label for="versionPicker">Document version</label><select id="versionPicker"><option value="">Connect to load documents</option></select>
-  <details><summary>Advanced: document IDs &amp; job response</summary><div class="grid">
-    <div><label for="job">Job ID</label><input id="job"></div><div><label for="version">Version ID</label><input id="version"></div><div><label for="document">Document ID</label><input id="document"></div>
-  </div><pre id="jobs"></pre></details>
+<div class="section-heading"><div><h2>Your library</h2><p class="muted">Choose a document to review, update or share. Older versions stay in its history.</p></div><div><button id="versions" class="secondary">Refresh library</button><button id="newUpload">+ Add document</button></div></div>
+<label for="documentSearch" class="sr-only">Find a document</label><input id="documentSearch" type="search" placeholder="Find a document by name…">
+<div id="documentList" class="document-list"><p class="empty-state">Connect to see your documents.</p></div>
+<details class="card" id="uploadPanel"><summary>Add or update a document</summary>
+<p id="updateBanner" class="callout" hidden></p><button id="cancelReplacement" class="secondary" hidden>Cancel update · add a new document instead</button>
+<div class="grid"><div><label for="file">Choose a file</label><input id="file" type="file" accept=".docx,.pptx,.xlsx,.pdf,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp"><p class="muted">PDF, Word, Excel, PowerPoint, CSV or image.</p></div>
+<div><label for="schedule">Schedule type</label><select id="schedule"><option value="">Automatic / not a schedule</option><option value="full">Full</option><option value="shared">Shared</option></select></div></div>
+<label id="uploadPermission" class="permission"><input id="uploadExternal" type="checkbox"> Authorize sending accepted text to Cohere for embedding</label>
+<button id="submit">Ingest document</button><p id="ingestSummary" role="status"></p>
+<details><summary>Replace a document / parsing tools</summary><label for="existingDoc">Existing document ID (filled by Update document)</label><input id="existingDoc">
+<label><input id="parseOnly" type="checkbox"> Parse only · do not automatically accept or index text</label>
+<button id="ingest" class="secondary">Resume parse</button><button id="jobStatus" class="secondary">Check job</button><button id="retry" class="secondary">Retry failed parse</button></details>
+</details>
+<div class="card selected-card"><span class="eyebrow">SELECTED DOCUMENT</span><h3 id="selectedName">No document selected</h3><p class="muted" id="selectedStatus">Open a document from the library above.</p>
+<div class="actions"><button id="openReview" class="secondary">Review held passages</button><button id="replaceSelected" class="secondary" disabled>Update document</button></div>
+<details><summary>Shared-library publication</summary><p class="muted">Share this exact current version with all library readers. Document originals become viewable; schedule publication shares records only. This does not approve held text.</p><label class="permission"><input id="confirmShare" type="checkbox"> I authorize this exact version for all shared-library readers, including guests.</label><button id="shareVersion" disabled>Publish shared version</button><p id="shareSummary" role="status"></p></details>
+</div>
+<details class="card" id="versionHistory"><summary>Version history &amp; technical identifiers</summary><label for="versionPicker">Open a specific version</label><select id="versionPicker"><option value="">Connect to load documents</option></select><div class="grid"><div><label for="job">Job ID</label><input id="job"></div><div><label for="version">Version ID</label><input id="version"></div><div><label for="document">Document ID</label><input id="document"></div></div><pre id="jobs"></pre></details>
 </section>
 <section id="panel-review" role="tabpanel" aria-labelledby="tab-review" hidden>
-  <h2>Extraction issues &amp; document details</h2>
-  <p id="reviewSummary" class="muted">Choose a document on the Documents screen first.</p>
-  <p class="muted">Ordinary clean text needs no manual approval. Only flagged extraction issues need attention; you can leave them out and search the rest. Missing “here” links need the original URL, not a guess.</p>
-  <button id="source" class="secondary">Open original</button><button id="inspect" class="secondary">Refresh review</button>
-  <details><summary>Source text, warnings &amp; technical details</summary>
-    <button id="markdown" class="secondary">Normalized Markdown</button><button id="manifest" class="secondary">Warnings &amp; diagnostics</button>
-    <pre id="versionInfo"></pre><pre id="artifact"></pre>
-  </details>
-  <button id="previous">Previous chunks</button><span id="pageInfo"></span><button id="next">Next chunks</button>
-  <details id="batchReview"><summary>Review several checked chunks together</summary>
-    <p class="muted">Select chunks on this screen after comparing them with the original. One note is recorded for each selected chunk. Pending chunks can stay pending; they are not searchable.</p>
-    <button id="selectPending" class="secondary">Select displayed pending chunks</button><button id="clearSelection" class="secondary">Clear selection</button>
-    <p class="muted">The selection shortcut skips missing-link answers. It does not verify tables, formulas or OCR for you.</p>
-    <p id="selectionInfo">0 selected</p>
-    <label for="batchNote">Shared review note: what source pages and records did you check?</label><textarea id="batchNote" rows="2"></textarea>
-    <label><input id="batchVerified" type="checkbox"> I checked every selected chunk against the original source</label>
-    <button id="approveSelected">Approve selected</button><button id="rejectSelected" class="secondary">Reject selected</button>
-  </details>
-  <div id="chunks"></div>
-  <hr><h3>Make approved chunks searchable</h3>
-  <p class="muted">This publishes the selected version and embeds approved chunks only. It does not approve unchecked content.</p>
-  <label id="indexingPermission"><input id="external" type="checkbox"> Send this version's approved text to Cohere</label>
-  <button id="ingestExisting">Ingest clean text (no review notes)</button>
-  <button id="makeSearchable">Make reviewed exceptions searchable</button><p id="indexSummary" class="muted"></p>
-  <details id="indexDetails"><summary>Advanced: index status &amp; maintenance</summary>
-    <button id="publish" class="secondary">Publish / retry failed jobs</button><button id="index" class="secondary">Process one batch</button><button id="reconcile" class="secondary">Clean stale vectors</button>
-    <button id="repair" class="secondary">Find missing vectors</button><pre id="indexInfo"></pre><pre id="embeddingInfo"></pre>
-  </details>
+<div class="section-heading"><div><h2>Review what needs attention</h2><p id="reviewSummary" class="muted">Open a document from the library first.</p></div><button id="inspect" class="secondary">Refresh review</button></div>
+<div id="reviewCounts" class="stat-grid"></div>
+<p class="callout">Clean accepted text is already usable. Review only the held content you need. Excluded placeholders are not a review checklist.</p>
+<div class="review-toolbar"><div><label for="reviewStatus">Show passages</label><select id="reviewStatus"><option value="pending">Needs review</option><option value="">All passages</option><option value="approved">Accepted</option><option value="rejected">Rejected</option><option value="excluded">Excluded</option></select></div><div><label for="reviewPage">Source page</label><input id="reviewPage" type="number" min="1" step="1" placeholder="All pages"></div><button id="clearReviewFilters" class="secondary">Reset filters</button><button id="source" class="secondary">View original</button></div>
+<div class="review-layout"><div class="review-evidence">
+<details id="batchReview" class="card"><summary>Review selected passages together</summary><p class="muted">Check a whole table or page once, then select its matching passages below. One note is saved for each selection. This does not verify unseen rows or other pages.</p>
+<button id="selectPending" class="secondary">Select displayed held passages</button><button id="clearSelection" class="secondary">Clear selection</button><p class="muted">Missing-link passages are skipped by shortcuts. They need the original URL.</p><p id="selectionInfo">0 selected</p>
+<label for="batchNote">What did you compare with the original?</label><textarea id="batchNote" rows="2" placeholder="Example: Page 12, all three timeline rows and both headers match."></textarea><label class="permission"><input id="batchVerified" type="checkbox"> I checked every selected passage against its original source</label><button id="approveSelected">Approve selected</button><button id="rejectSelected" class="secondary">Reject selected</button>
+</details>
+<div class="pagination"><button id="previous" class="secondary">← Previous</button><span id="pageInfo"></span><button id="next" class="secondary">Next →</button></div>
+<div id="chunks"><p class="empty-state">Choose a document to see its held passages.</p></div>
+</div>
+<aside class="source-preview" id="previewPanel"><div class="section-heading"><h3>Original source</h3><button id="closePreview" class="secondary">Close preview</button></div><p id="previewHint" class="muted">View the original to compare it beside the extracted text. PDF and supported image previews stay local.</p><img id="originalImage" alt="Original source page preview" hidden><a id="originalDownload" hidden>Download original</a><button id="openSourceTab" class="secondary" hidden>Open original in a new tab ↗</button></aside>
+</div>
+<div class="card"><h3>Index accepted evidence</h3><p class="muted">Index only accepted passages. This does not approve held content or share the document publicly.</p><p id="indexSummary" role="status"></p><label id="indexingPermission" class="permission"><input id="external" type="checkbox"> Authorize sending this version's accepted text to Cohere</label><button id="ingestExisting" class="secondary">Process clean text</button><button id="makeSearchable">Index reviewed passages</button>
+<details id="indexDetails"><summary>Advanced index maintenance</summary><button id="publish" class="secondary">Publish / retry failed jobs</button><button id="index" class="secondary">Process one batch</button><button id="reconcile" class="secondary">Clean stale vectors</button><button id="repair" class="secondary">Find missing vectors</button><pre id="indexInfo"></pre><pre id="embeddingInfo"></pre></details>
+</div>
+<details class="card"><summary>Extracted text, warnings &amp; provenance</summary><button id="markdown" class="secondary">Normalized Markdown</button><button id="manifest" class="secondary">Warnings &amp; diagnostics</button><pre id="versionInfo"></pre><pre id="artifact"></pre></details>
+</section>
+<section id="panel-jobs" role="tabpanel" aria-labelledby="tab-jobs" hidden>
+<div class="section-heading"><div><h2>Processing jobs</h2><p class="muted">Read the status, then open its document to review or resume work. Refreshing this list does not call an AI provider.</p></div><button id="refreshJobs" class="secondary">Refresh jobs</button></div><div id="jobList"><p class="empty-state">Connect, then refresh jobs.</p></div>
+<div class="card"><h3>Trace an issue</h3><p class="muted">Paste a request ID from chatbot Request details, or leave it empty for recent activity. Logs also appear in PowerShell and data/logs/console.log.</p><label for="logRequestId">Request ID (optional)</label><input id="logRequestId" placeholder="Paste a request ID"><button id="showLogs">Show operation logs</button><pre id="operationLogs"></pre></div>
 </section>
 <section id="panel-search" role="tabpanel" aria-labelledby="tab-search" hidden>
-  <h2>Ask your sources</h2>
-  <p class="muted">Find approved evidence with mandatory reranking. This is not an AI-written answer. Local demo mode tests the workflow only.</p>
-  <label for="question">Question about an approved source</label><input id="question">
-  <details><summary>Search filters &amp; advanced options</summary><div class="grid">
-    <div><label for="retrievalStrategy">Candidate search</label><select id="retrievalStrategy"><option value="hybrid">Hybrid: semantic + keyword (RRF)</option><option value="dense">Semantic only (still reranked)</option></select></div>
-    <div><label for="candidateCount">Candidate passages</label><input id="candidateCount" type="number" min="1" max="100" value="30"></div>
-    <div><label for="topK">Final results</label><input id="topK" type="number" min="1" max="20" value="5"></div>
-    <div><label for="retrievalDocument">Document ID filter (optional)</label><input id="retrievalDocument"></div>
-    <div><label for="retrievalCategory">Exact category (optional)</label><input id="retrievalCategory"></div>
-    <div><label for="retrievalSource">Exact source filename (optional)</label><input id="retrievalSource"></div>
-  </div></details>
-  <label id="retrievalPermission"><input id="retrievalExternal" type="checkbox"> Permit this question and approved candidate passages to be sent to Cohere</label>
-  <button id="retrieve">Search approved sources</button>
-  <p id="searchSummary" role="status"></p><div id="retrievalResults"></div>
-  <details><summary>How results were ranked / diagnostics</summary><p class="muted">Scores are relevance, not factual confidence. No answerability threshold has been calibrated.</p><pre id="retrievalInfo"></pre><div id="rankingComparison"></div><pre id="retrievalTrace"></pre></details>
-  <details><summary>Diagnostic baseline without reranking (not the retrieval pipeline)</summary>
-    <button id="search">Run semantic baseline only</button><pre id="results"></pre>
-  </details>
+<h2>Test source retrieval</h2><p class="muted">Check which accepted passages are found and how reranking orders them. For generated answers, use the chatbot. Local demo vectors test the workflow only.</p><label for="question">Question</label><input id="question" placeholder="Ask a source-backed test question…">
+<details class="card"><summary>Search filters &amp; ranking settings</summary><div class="grid"><div><label for="retrievalStrategy">Search strategy</label><select id="retrievalStrategy"><option value="hybrid">Hybrid · semantic + keyword</option><option value="dense">Semantic only</option></select></div><div><label for="candidateCount">Candidates sent to reranking</label><input id="candidateCount" type="number" min="1" max="100" value="30"></div><div><label for="topK">Final results</label><input id="topK" type="number" min="1" max="20" value="5"></div><div><label for="retrievalDocument">Document ID (optional)</label><input id="retrievalDocument"></div><div><label for="retrievalCategory">Exact category (optional)</label><input id="retrievalCategory"></div><div><label for="retrievalSource">Exact filename (optional)</label><input id="retrievalSource"></div></div></details>
+<label id="retrievalPermission" class="permission"><input id="retrievalExternal" type="checkbox"> Authorize sending this question and accepted candidate passages to Cohere</label><button id="retrieve">Search &amp; rerank</button><p id="searchSummary" role="status"></p><div id="retrievalResults"></div>
+<details class="card"><summary>Ranking comparison &amp; diagnostics</summary><p class="muted">Relevance scores are not confidence. No answerability threshold has been calibrated.</p><pre id="retrievalInfo"></pre><div id="rankingComparison"></div><pre id="retrievalTrace"></pre></details><details class="card"><summary>Advanced: semantic baseline without reranking</summary><button id="search" class="secondary">Run baseline only</button><pre id="results"></pre></details>
 </section>
 <section id="panel-schedules" role="tabpanel" aria-labelledby="tab-schedules" hidden>
-  <h2>Find schedule rows</h2>
-  <p>Validated schedule CSVs become typed rows automatically. Technology, flavor, and date filters use those rows.</p>
-  <div class="grid"><div><label for="kind">Kind</label><select id="kind"><option value="full">Full</option><option value="shared">Shared</option></select></div>
-  <div><label for="technology">Technology (nm, optional)</label><input id="technology" type="number" min="0"></div>
-  <div><label for="flavor">Flavor (optional)</label><input id="flavor"></div>
-  <div><label for="tapeout">Tapeout on or after (optional)</label><input id="tapeout" type="date"></div></div>
-  <button id="schedules">Find schedule rows</button><pre id="scheduleResults"></pre>
-</section></main>
-<p class="muted">Local administrator console · <a href="/docs">FastAPI reference</a> · Source approval and index state are stored separately.</p>
+<h2>Check schedule records</h2><p class="muted">Exact database lookups, not AI-generated dates. These filters search current imported schedules in this workspace.</p><div class="grid"><div><label for="kind">Schedule</label><select id="kind"><option value="full">Full</option><option value="shared">Shared</option></select></div><div><label for="technology">Technology (nm, optional)</label><input id="technology" type="number" min="1"></div><div><label for="flavor">Exact flavor (optional)</label><input id="flavor"></div><div><label for="tapeout">Tapeout on or after (optional)</label><input id="tapeout" type="date"></div></div><button id="schedules">Find schedule rows</button><div id="scheduleTable"></div><details class="card"><summary>Raw schedule response</summary><pre id="scheduleResults"></pre></details>
+</section>
+</main><footer>GSME Muse · Local administration · Acceptance, indexing and shared publication are separate steps.</footer>
+</div></div>
 </body></html>

@@ -17,6 +17,7 @@ from gsme_rag.parsing.schedules import is_schedule_header, make_source_id, resol
 from gsme_rag.parsing.pdf import parse_pdf_to_markdown
 from gsme_rag.parsing.links import missing_link_warnings
 from gsme_rag.parsing.office import parse_pptx_to_markdown, parse_xlsx_to_markdown
+from gsme_rag.parsing.limits import validate_office_container
 
 
 def parse_to_markdown(
@@ -26,12 +27,13 @@ def parse_to_markdown(
     pdf_backend: str | None = None,
 ) -> ParsedDocument:
     input_path = Path(path)
+    validate_office_container(input_path)
     # Hash before and after extraction so provenance cannot describe different bytes.
     with input_path.open("rb") as source:
         original_digest = hashlib.file_digest(source, "sha256").hexdigest()
     suffix = input_path.suffix.casefold()
-    if suffix != ".csv" and schedule_kind in {"full", "shared"}:
-        raise ValueError("Full or Shared schedule type applies only to a schedule CSV")
+    if suffix not in {".csv", ".xlsx"} and schedule_kind in {"full", "shared"}:
+        raise ValueError("Full or Shared schedule type applies only to a schedule CSV/XLSX")
     try:
         if suffix == ".docx":
             result = parse_docx_to_markdown(input_path, source_name=source_name)

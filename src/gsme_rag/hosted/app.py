@@ -5,13 +5,15 @@ workspace, reviewer, visibility or identity is accepted. Uploads are private.
 """
 
 from dataclasses import dataclass
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager, asynccontextmanager, ExitStack
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 from hashlib import sha256
 import os
 import math
 from pathlib import Path
 import tempfile
-from threading import BoundedSemaphore, Lock
+from threading import BoundedSemaphore, Lock, Event, Thread
 import time
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -23,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 import psycopg
 
-from gsme_rag.generation.answers import generate_answer, require_answer_permission
+from gsme_rag.generation.answers import AnswerCache, AnswerCancelled, generate_answer, require_answer_permission
 from gsme_rag.observability import emit, REQUEST_ID, configure_console_logging
 from gsme_rag.retrieval import RetrievalOptions, retrieve
 from gsme_rag.retrieval.schedules import ScheduleQuery, search_schedules, ScheduleSnapshotChanged
@@ -33,11 +35,24 @@ from gsme_rag.storage.pipeline import process_ingestion, process_index
 from gsme_rag.storage.postgres import EvidenceStore
 from gsme_rag.storage.providers import CohereEmbeddings, ProviderOperationError
 from gsme_rag.retrieval.reranking import CohereReranker
+from gsme_rag.retrieval.planning import interpret_comparison
 from gsme_rag.storage.vectors import QdrantEvidence
 from gsme_rag.version import __version__
 from .access import AccessStore, Principal
 from .identity import google_principal, IdentityUnavailable, InvalidIdentity
 from .sessions import browser_principal, create_browser_session, SESSION_SECONDS
+from .history import ChatHistory, source_keys
+from .streaming import answer_stream
+
+
+UPLOAD_ERROR_MESSAGES = {
+    "embedding_content_not_approved": "Indexing blocked: GSME_EXTERNAL_CONTENT_APPROVED=yes is not enabled. After authorizing external processing, set it in .env, restart the server, then resume this upload once.",
+    "embedding_key_missing": "Indexing blocked: COHERE_API_KEY is missing. Add it to .env, restart the server, then resume this upload once.",
+    "credentials": "Cohere rejected the API credentials or model access. The operator must fix the API account before resuming this upload.",
+    "quota_exhausted": "Cohere API-call quota exhausted. Wait for the account quota to reset or configure an account/key with available quota, then resume. Re-uploading and repeated retries will not help.",
+    "retry_exhausted": "Automatic processing stopped after repeated failures. Check provider connectivity, limits and server logs before resuming.",
+    "source_review_required": "The extracted content needs source review before it can be searched.",
+}
 
 
 @dataclass(frozen=True)
@@ -92,6 +107,12 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     document_id: UUID | None = None
     generate_answer: bool = True
+    chat_id: UUID | None = None
+
+
+class ChatTitle(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=120, pattern=r"\S")
 
 
 class HostedScheduleQuery(ScheduleQuery):
@@ -134,11 +155,13 @@ def cited_source_groups(answer, results):
     return list(groups.values())
 
 
-def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, providers=None):
+def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, providers=None, auto_worker=None):
+    answer_cache = AnswerCache()
     settings, hosted = settings or from_env(), hosted or HostedSettings.from_env()
     if store is None and providers is None:
         configure_console_logging(settings.data_dir)
     store = store or EvidenceStore(settings.database_url)
+    history = ChatHistory(store, hosted.tenant)
     verifier = verifier or (lambda token: google_principal(token, hosted.google_client_id, hosted.workspace_domains))
 
     @contextmanager
@@ -158,11 +181,59 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                 vectors = QdrantEvidence(settings.qdrant_url, settings.collection, settings.dimension, hybrid=True)
             resources.callback(vectors.client.close)
             yield provider, reranker, vectors
-    app = FastAPI(title="GSME Muse", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
+    worker_stop = Event()
+    worker_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gsme-upload")
+    worker_enabled = providers is None if auto_worker is None else auto_worker
+
+    @asynccontextmanager
+    async def lifespan(app):
+        schema_ready = True
+        if worker_enabled:
+            # Also catch uploads interrupted between installing the migration
+            # and restarting an older server. Never enroll offline staged versions.
+            def recover():
+                with store.connect() as db:
+                    db.execute("""UPDATE ingestion_jobs j SET hosted_auto_process=true
+                        FROM document_versions v,documents d,document_access a
+                        WHERE j.version_id=v.id AND j.tenant_id=%s AND d.id=v.document_id
+                        AND d.current_version_id=v.id AND a.document_id=d.id
+                        AND a.owner_subject IS NOT NULL AND a.visibility='private'
+                        AND v.state IN ('approved','indexing') AND NOT j.hosted_auto_process
+                        AND j.hosted_error_code IS NULL
+                        AND EXISTS (SELECT 1 FROM index_jobs i JOIN evidence_chunks c ON c.id=i.chunk_id
+                        WHERE c.version_id=v.id AND i.state IN ('queued','failed','indexing')
+                        AND i.retryable AND i.attempt_count<5)""",(hosted.tenant,))
+            try:
+                await asyncio.to_thread(recover)
+            except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn):
+                # Keep the existing actionable setup response available instead
+                # of crashing before the health/document endpoints can explain it.
+                schema_ready = False
+                emit("hosted.worker.schema_incomplete")
+        def poll():
+            while not worker_stop.wait(2):
+                try:
+                    run_due_uploads()
+                except Exception as error:
+                    emit("hosted.worker.failed", error_type=type(error).__name__)
+        thread = Thread(target=poll, name="gsme-upload-scheduler", daemon=True) if worker_enabled and schema_ready else None
+        if thread:
+            thread.start()
+        try:
+            yield
+        finally:
+            worker_stop.set()
+            if thread:
+                await asyncio.to_thread(thread.join, 5)
+            await asyncio.to_thread(worker_pool.shutdown, wait=True, cancel_futures=False)
+
+    app = FastAPI(title="GSME Muse", version=__version__, docs_url=None, redoc_url=None, openapi_url=None,
+                  lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(hosted.origin).hostname])
     web = Path(__file__).with_name("web")
     app.mount("/assets", StaticFiles(directory=web), name="assets")
     chat_slots, upload_slots = BoundedSemaphore(2), BoundedSemaphore(4)
+    stream_slots = BoundedSemaphore(2)
     processing_versions, processing_lock = set(), Lock()
     session_cookie = "__Host-gsme_guest" if hosted.origin.startswith("https:") else "gsme_guest"
 
@@ -223,7 +294,13 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
 
     @app.exception_handler(ProviderOperationError)
     async def provider_unavailable(request, error):
-        emit("hosted.provider.unavailable", level=40, error_type=type(error).__name__)
+        emit("hosted.provider.unavailable", level=40, error_type=type(error).__name__, failure_reason=error.error_code)
+        if error.error_code == "quota_exhausted":
+            return JSONResponse({"detail": UPLOAD_ERROR_MESSAGES["quota_exhausted"], "code": error.error_code}, status_code=503)
+        if error.error_code == "rate_limit":
+            return JSONResponse({"detail": "Cohere temporarily rate-limited search. No answer was generated; try after the provider cooldown.",
+                                 "code": error.error_code}, status_code=503,
+                                headers={"Retry-After": str(max(1, math.ceil(error.retry_after_seconds)))})
         return JSONResponse({"detail": "Search provider unavailable; no unreranked answer returned"}, status_code=502)
 
     @app.exception_handler(ScheduleSnapshotChanged)
@@ -307,7 +384,8 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
     def documents(scoped=Depends(access)):
         rows = scoped.visible_documents()
         for row in rows:
-            row["processing"] = str(row["version_id"]) in processing_versions
+            row["processing"] = str(row["version_id"]) in processing_versions or row["automatic_processing"]
+            row["processing_message"] = UPLOAD_ERROR_MESSAGES.get(row["processing_error"])
         return {"documents": rows[:100], "has_more": len(rows) > 100,
                 "signed_in": scoped.principal.company_signed_in,
                 "browser_workspace": bool(scoped.principal.subject and scoped.principal.subject.startswith("guest:"))}
@@ -334,10 +412,17 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                 JOIN evidence_chunks c ON c.id=j.chunk_id WHERE c.version_id=%s
                 AND j.state='failed' AND j.last_error LIKE '%%HTTP 429%%'
                 AND j.next_attempt_at>now()""", (version_id,)).fetchone()["seconds"]
+            automatic = db.execute("""SELECT hosted_auto_process,hosted_error_code,
+                GREATEST(0,ceil(extract(epoch FROM (hosted_next_attempt_at-now()))))::int AS seconds
+                FROM ingestion_jobs WHERE version_id=%s AND tenant_id=%s""", (version_id,hosted.tenant)).fetchone()
         return {"version_id": str(version_id), "document_id": str(inspection["version"]["document_id"]),
                 "state": inspection["version"]["state"], "document_class": inspection["version"]["document_class"],
                 "processing": str(version_id) in processing_versions,
-                **counts, "held_reasons": reasons, "retry_after_seconds": cooldown,
+                **counts, "held_reasons": reasons,
+                "automatic_processing": bool(automatic and automatic["hosted_auto_process"]),
+                "processing_error": automatic["hosted_error_code"] if automatic else None,
+                "processing_message": UPLOAD_ERROR_MESSAGES.get(automatic["hosted_error_code"]) if automatic else None,
+                "retry_after_seconds": max(cooldown,automatic["seconds"] if automatic and automatic["hosted_auto_process"] else 0),
                 "index_jobs": {row["state"]: row["count"] for row in jobs}}
 
     @app.delete("/api/documents/{version_id}")
@@ -389,8 +474,92 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
         return {**result, "kind": "text", "text": text,
                 "notice": "Extracted text preview, not the original Office layout. Tables, images and formulas may differ; uncertain extraction is not verified."}
 
+    @app.get("/api/chats")
+    def chats(scoped=Depends(access)):
+        return history.list(scoped)
+
+    @app.post("/api/chats")
+    def create_chat(scoped=Depends(access)):
+        return history.create(scoped)
+
+    @app.get("/api/chats/{chat_id}")
+    def load_chat(chat_id: UUID, scoped=Depends(access)):
+        return history.load(chat_id, scoped)
+
+    @app.delete("/api/chats/{chat_id}")
+    def delete_chat(chat_id: UUID, scoped=Depends(access)):
+        history.delete(chat_id, scoped)
+        return {"deleted": True}
+
+    @app.patch("/api/chats/{chat_id}")
+    def rename_chat(chat_id: UUID, body: ChatTitle, scoped=Depends(access)):
+        history.rename(chat_id, scoped, body.title.strip())
+        return {"renamed": True}
+
     @app.post("/api/chat")
     def chat(body: ChatRequest, request: Request, scoped=Depends(access)):
+        return run_chat(body, request, scoped)
+
+    @app.post("/api/chat/stream")
+    async def chat_stream(body: ChatRequest, request: Request, scoped=Depends(access)):
+        if body.chat_id:
+            await asyncio.to_thread(history.check, body.chat_id, scoped)
+        if not stream_slots.acquire(blocking=False):
+            raise HTTPException(503, "Search is busy; retry shortly", headers={"Retry-After":"3"})
+
+        def public_error(error):
+            emit("hosted.stream.failed", error_type=type(error).__name__)
+            if isinstance(error, ProviderOperationError):
+                if error.error_code == "quota_exhausted":
+                    return {"detail":UPLOAD_ERROR_MESSAGES["quota_exhausted"], "code":error.error_code}
+                if error.error_code == "rate_limit":
+                    return {"detail":"Cohere temporarily rate-limited search. Try after the provider cooldown.",
+                            "code":error.error_code, "retry_after_seconds":max(1,math.ceil(error.retry_after_seconds))}
+                return {"detail":"Search provider unavailable; no unreranked answer returned", "code":error.error_code}
+            if isinstance(error, HTTPException):
+                return {"detail":error.detail, "code":str(error.status_code)}
+            if isinstance(error, ValueError):
+                return {"detail":"Request or provider configuration is invalid; contact the operator", "code":"configuration"}
+            return {"detail":"The request could not complete. Check the backend log using this request ID.", "code":"server_error"}
+
+        def validate_event(event):
+            if event["type"] == "claim":
+                keys={(str(p["version_id"]),p["chunk_id"]) for p in event["source_refs"]}
+            else:
+                keys=source_keys(event["result"])[0]
+            return not keys or keys <= scoped.approved_source_keys(keys)
+
+        return answer_stream(lambda publish, cancelled: run_chat(body, request, scoped, publish, cancelled),
+                             request, public_error, stream_slots.release, validate_event)
+
+    def run_chat(body, request, scoped, on_event=None, cancelled=None):
+        cancelled = cancelled or (lambda:False)
+        if body.chat_id:
+            history.check(body.chat_id, scoped)
+        try:
+            result = answer_chat(body, request, scoped, on_event, cancelled)
+        except (ProviderOperationError, ValueError, HTTPException) as error:
+            if body.chat_id and not cancelled():
+                # Keep failed turns for diagnosis without persisting raw provider
+                # exceptions (which can contain document text or credentials).
+                failure = {"status": "request_failed", "request_id": REQUEST_ID.get(), "results": [],
+                    "answer_sources": [], "answer": {"status": "request_failed", "claims": [], "citations": [],
+                    "text": "This request could not complete. Check Request details and the backend log, or try again."}}
+                try:
+                    history.append(body.chat_id, scoped, body.question, failure)
+                except (psycopg.Error, HTTPException):
+                    emit("hosted.history.save_failed", error_type=type(error).__name__)
+            raise
+        if cancelled():
+            raise AnswerCancelled()
+        if body.chat_id:
+            history.append(body.chat_id, scoped, body.question, result)
+        return result
+
+    def answer_chat(body, request, scoped, on_event=None, cancelled=None):
+        cancelled = cancelled or (lambda:False)
+        if cancelled():
+            raise AnswerCancelled()
         rate("chat:" + (scoped.principal.subject or "guest:" + request.client.host), hosted.chat_per_user_minute)
         rate("chat:global", hosted.chat_global_minute)
         rate("chat:global", hosted.chat_global_day, seconds=86400)
@@ -398,6 +567,12 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
             raise HTTPException(503, "Search is busy; retry shortly", headers={"Retry-After": "3"})
         try:
             document = str(body.document_id) if body.document_id else None
+            interpretation = interpret_comparison(body.question)
+            question = interpretation["search_question"] if interpretation else body.question
+            if interpretation:
+                emit("hosted.query.interpreted", failure_reason=interpretation["reason"])
+                if on_event:
+                    on_event({"type":"status", "stage":"interpreting", "notice":interpretation["notice"]})
             emit("hosted.chat.started", question_hash=sha256(body.question.encode()).hexdigest(),
                  query_chars=len(body.question), document_id=document)
             # Chat always searches documents. Exact schedule lookup is an
@@ -405,21 +580,28 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
             greeting = " ".join(body.question.casefold().strip(" !?.").split())
             if greeting in {"hi", "hello", "hey", "how are you", "hi how are you"}:
                 return {"route": "documents", "status": "greeting", "answer": {
-                    "status": "greeting", "text": "Hi! I'm ready to help. Ask me about the FAQs or choose a document below.",
+                    "status": "greeting", "text": "Hi! I'm ready to help. Ask about the FAQs or your documents. All files searches the available collection.",
                     "claims": [], "citations": []}, "results": [], "schedule_search": None,
                     "rerank_input_count": 0, "timings_ms": {}}
             if body.generate_answer:
                 require_answer_permission(True)  # Organization policy, not a browser reviewer flag.
             with backend() as (provider, reranker, vectors):
                 report = retrieve(scoped, vectors, provider, reranker, settings, hosted.tenant,
-                    body.question, RetrievalOptions(document_id=document, min_rerank_score=hosted.min_rerank_score))
-            answer = generate_answer(body.question, report,
-                lambda part: scoped.is_source_current_approved(hosted.tenant, part["version_id"], part["chunk_id"])) if body.generate_answer else None
+                    question, RetrievalOptions(document_id=document, min_rerank_score=hosted.min_rerank_score))
+            if cancelled():
+                raise AnswerCancelled()
+            answer = generate_answer(question, report,
+                lambda part: scoped.is_source_current_approved(hosted.tenant, part["version_id"], part["chunk_id"]),
+                cache=answer_cache, cache_scope=(hosted.tenant, scoped.principal.subject or "public", document),
+                **({"on_event":on_event, "cancelled":cancelled} if on_event else {})) if body.generate_answer else None
+            if answer is not None and interpretation:
+                answer["question_interpretation"] = interpretation
+                answer["text"] = interpretation["notice"] + "\n\n" + answer["text"]
             if answer is not None and report["status"] == "no_eligible_evidence":
                 # Missing index/workspace setup is not a negative evidence result.
                 answer.update(status="no_searchable_documents", text=(
                     "No approved indexed passages are available for the selected document. Choose All files or another document."
-                    if document else "No approved indexed documents are available in this chatbot workspace. If sources were just shared, restart the chatbot server and refresh the page."))
+                    if document else "No approved indexed documents are available in this workspace yet. Use + to upload a file and wait for Ready to chat, or ask the operator to publish the shared collection."))
             # A permission/source change while the model is running must also
             # remove old retrieval extracts, not merely suppress generated prose.
             visible = [item for item in report["results"] if item.get("context_parts") and all(
@@ -439,6 +621,8 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                  model=answer.get("model") if answer else None,
                  fallback_used=answer.get("fallback_used") if answer else None)
             return {"route": "documents", "status": report["status"], "answer": answer,
+                    "retrieval_strategy": report.get("strategy", "hybrid"),
+                    "question_interpretation": interpretation,
                     "request_id": REQUEST_ID.get(), "answer_sources": sources,
                     "results": report["results"], "schedule_search": None,
                     "rerank_input_count": report["rerank_input_count"], "timings_ms": report["timings_ms"]}
@@ -453,36 +637,141 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                 row["source_url"] = None
         return result
 
-    def ingest_private(job, version):
-        try:
-            inspection = store.inspect_version(hosted.tenant, version, 1)
-            if inspection["version"]["state"] in {"queued", "parsing"}:
-                parsed = process_ingestion(store, settings, job)
-                if not parsed or parsed["state"] != "review_needed":
-                    return
-            inspection = store.inspect_version(hosted.tenant, version, 1)
-            if inspection["version"]["document_class"] == "schedule":
+    def auto_state(job, *, delay=None, error_code=None):
+        """Persist the next step; browser polling never drives provider retries."""
+        with store.connect() as db:
+            db.execute("""UPDATE ingestion_jobs SET hosted_auto_process=%s,
+                hosted_next_attempt_at=now()+(%s*interval '1 second'),hosted_error_code=%s
+                WHERE id=%s AND tenant_id=%s""", (delay is not None, delay or 0, error_code, job, hosted.tenant))
+
+    def enroll_upload(job, *, reset_failed=False):
+        auto_state(job, delay=0)
+        if reset_failed:
+            with store.connect() as db:
+                db.execute("""UPDATE index_jobs SET attempt_count=0,retryable=true,next_attempt_at=now()
+                    WHERE state='failed' AND chunk_id IN (SELECT c.id FROM evidence_chunks c
+                    JOIN ingestion_jobs i ON i.version_id=c.version_id WHERE i.id=%s AND i.tenant_id=%s)""",
+                    (job, hosted.tenant))
+
+    def run_due_uploads():
+        """Recover enrolled uploads after cooldowns/restarts, across server workers."""
+        with store.connect() as db:
+            rows = db.execute("""SELECT j.id,j.version_id FROM ingestion_jobs j
+                JOIN document_versions v ON v.id=j.version_id
+                JOIN document_access a ON a.document_id=v.document_id
+                WHERE j.tenant_id=%s AND j.hosted_auto_process AND j.hosted_next_attempt_at<=now()
+                  AND v.state<>'superseded' AND a.owner_subject IS NOT NULL
+                ORDER BY j.hosted_next_attempt_at LIMIT 4""", (hosted.tenant,)).fetchall()
+        futures = []
+        for row in rows:
+            version = str(row["version_id"])
+            with processing_lock:
+                if version in processing_versions or not upload_slots.acquire(blocking=False):
+                    continue
+                processing_versions.add(version)
+            try:
+                futures.append(worker_pool.submit(ingest_private, str(row["id"]), version))
+            except BaseException:
+                processing_versions.discard(version)
+                upload_slots.release()
+                raise
+        return futures
+
+    # Python-only hook for deterministic scheduler tests, never a public endpoint.
+    app.state.run_due_uploads = run_due_uploads
+    app.state.upload_worker_pool = worker_pool
+
+    def advance_upload(job, version):
+        inspection = store.inspect_version(hosted.tenant, version, 1)
+        if not inspection or inspection["version"]["state"] == "superseded":
+            auto_state(job, error_code="cancelled")
+            return
+        if inspection["version"]["state"] in {"queued", "parsing"}:
+            parsed = process_ingestion(store, settings, job)
+            if parsed is None:
+                auto_state(job, delay=5)
                 return
-            accepted = store.accept_clean_text(hosted.tenant, version)
-            if not accepted["accepted"]:
+            if parsed["state"] == "failed":
+                auto_state(job, error_code="parse_failed")
                 return
-            with backend(need_reranker=False) as (provider, _, vectors):
-                inspection = store.inspect_version(hosted.tenant, version, 1)
+        inspection = store.inspect_version(hosted.tenant, version, 1)
+        if inspection["version"]["document_class"] == "schedule":
+            auto_state(job)
+            return
+        if not store.accept_clean_text(hosted.tenant, version)["accepted"]:
+            auto_state(job, error_code="source_review_required")
+            return
+        with backend(need_reranker=False) as (provider, _, vectors):
+            with store.connect() as db:
+                published = db.execute("""SELECT 1 FROM index_jobs j JOIN evidence_chunks c ON c.id=j.chunk_id
+                    WHERE c.version_id=%s AND j.model_version=%s AND j.collection_name=%s LIMIT 1""",
+                    (version, provider.model_version, vectors.collection)).fetchone()
+            # A staged version can retain jobs from an interrupted/offline run
+            # without being current. Those jobs cannot be claimed until publish.
+            if not published or not inspection["version"]["is_current"]:
                 store.publish(hosted.tenant, str(inspection["version"]["document_id"]), version,
                               provider.model_version, vectors.collection)
-                for _ in range(20):
-                    result = process_index(store, vectors, provider, settings, hosted.tenant, version)
-                    if not result["indexed"] or result["failed"]:
-                        break
-                # An idempotent publish may have no new jobs. Restore the ready
-                # state from existing completed jobs instead of polling forever.
-                store.mark_indexed_versions([UUID(version)])
+            for _ in range(20):
+                if worker_stop.is_set():
+                    auto_state(job, delay=0)
+                    return
+                result = process_index(store, vectors, provider, settings, hosted.tenant, version)
+                if result["failed"]:
+                    with store.connect() as db:
+                        remaining = db.execute("""SELECT max(j.attempt_count) AS attempts FROM index_jobs j
+                            JOIN evidence_chunks c ON c.id=j.chunk_id WHERE c.version_id=%s
+                            AND j.state='failed' AND j.model_version=%s AND j.collection_name=%s""",
+                            (version, provider.model_version, vectors.collection)).fetchone()["attempts"] or 1
+                    retry = result.get("retryable", False) and remaining < 5
+                    error_code = ("retry_exhausted" if result.get("retryable", False) and remaining >= 5
+                                  else result.get("error_code", "indexing_failed"))
+                    auto_state(job, delay=max(2**remaining, result.get("retry_after_seconds", 0)) if retry else None,
+                               error_code=error_code)
+                    emit("hosted.upload.waiting" if retry else "hosted.upload.stopped", version_id=version,
+                         failure_reason=result.get("error_code", "indexing_failed"))
+                    return
+                if not result["indexed"]:
+                    break
+            store.mark_indexed_versions([UUID(version)])
+            with store.connect() as db:
+                pending = db.execute("""SELECT count(*) AS count,
+                    COALESCE(ceil(min(extract(epoch FROM (CASE WHEN j.state='indexing'
+                    THEN j.claimed_at+(%s*interval '1 second') ELSE j.next_attempt_at END-now())))),0)::int AS delay
+                    FROM index_jobs j JOIN evidence_chunks c ON c.id=j.chunk_id
+                    WHERE c.version_id=%s AND j.model_version=%s AND j.collection_name=%s
+                    AND j.state IN ('queued','failed','indexing') AND j.retryable AND j.attempt_count<5""",
+                    (settings.lease_seconds,version,provider.model_version,vectors.collection)).fetchone()
+            final = store.inspect_version(hosted.tenant,version,1)["version"]["state"]
+            auto_state(job, delay=max(0,pending["delay"])+1 if pending["count"] else None,
+                       error_code="retry_exhausted" if not pending["count"] and final != "indexed" else None)
+
+    def ingest_private(job, version):
+        trace = REQUEST_ID.set(REQUEST_ID.get() or str(uuid4()))
+        try:
+            emit("hosted.upload.advancing",job_id=job,version_id=version)
+            # A session lock outlives individual transactions and prevents two
+            # API processes from advancing/publishing the same upload at once.
+            with store.connect() as guard:
+                locked = guard.execute("SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS locked",
+                                       ("hosted-upload:"+version,)).fetchone()["locked"]
+                guard.commit()
+                if not locked:
+                    return
+                advance_upload(job, version)
         except Exception as error:
-            emit("hosted.upload.failed", version_id=version, error_type=type(error).__name__)
+            code = getattr(error, "error_code", "storage_unavailable" if isinstance(error,psycopg.OperationalError)
+                           else "configuration_or_processing_error")
+            emit("hosted.upload.failed", version_id=version, error_type=type(error).__name__, failure_reason=code)
+            try:
+                auto_state(job, delay=5 if isinstance(error,psycopg.OperationalError) else None,
+                           error_code=code)
+            except Exception:
+                pass  # The enrolled durable row remains recoverable after DB loss.
         finally:
             with processing_lock:
                 processing_versions.discard(version)
             upload_slots.release()
+            REQUEST_ID.reset(trace)
 
     @app.post("/api/upload")
     def upload(background: BackgroundTasks, request: Request, file: UploadFile = File(...),
@@ -522,9 +811,13 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                 return {"version_id": submitted["version_id"], "status": "existing", "visibility": "owner_only"}
             with processing_lock:
                 processing_versions.add(submitted["version_id"])
+            enroll_upload(submitted["job_id"])
             background.add_task(ingest_private, submitted["job_id"], submitted["version_id"])
             return {"version_id": submitted["version_id"], "status": "queued", "visibility": "owner_only"}
         except BaseException:
+            if submitted:
+                with processing_lock:
+                    processing_versions.discard(submitted["version_id"])
             upload_slots.release()
             raise
 
@@ -541,16 +834,17 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                 AND j.state='failed' AND j.last_error LIKE '%%HTTP 429%%'
                 AND j.next_attempt_at>now()""", (version_id,)).fetchone()["seconds"]
         if cooldown:
-            raise HTTPException(429, f"Cohere rate limit: wait {cooldown} seconds before Retry. Already indexed passages remain searchable.",
+            raise HTTPException(429, f"Cohere rate limit: processing is paused for {cooldown} seconds. Enrolled uploads resume automatically; already indexed passages remain searchable.",
                                 headers={"Retry-After": str(cooldown)})
         with processing_lock:
             if str(version_id) in processing_versions:
                 return {"status": "processing", "version_id": str(version_id)}
         if not upload_slots.acquire(blocking=False):
             raise HTTPException(503, "Upload queue is busy; retry shortly")
+        registered = False
         try:
             with store.connect() as db:
-                row = db.execute("SELECT id FROM ingestion_jobs WHERE tenant_id=%s AND version_id=%s",
+                row = db.execute("SELECT id,hosted_auto_process FROM ingestion_jobs WHERE tenant_id=%s AND version_id=%s",
                                  (hosted.tenant, version_id)).fetchone()
             if not row:
                 raise HTTPException(404, "Document job unavailable")
@@ -564,9 +858,14 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                 if str(version_id) in processing_versions:
                     raise HTTPException(409, "Document is already processing")
                 processing_versions.add(str(version_id))
+                registered = True
+            enroll_upload(str(row["id"]), reset_failed=not row["hosted_auto_process"])
             background.add_task(ingest_private, str(row["id"]), str(version_id))
             return {"status": "queued", "version_id": str(version_id)}
         except BaseException:
+            if registered:
+                with processing_lock:
+                    processing_versions.discard(str(version_id))
             upload_slots.release()
             raise
 

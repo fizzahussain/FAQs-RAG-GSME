@@ -1,197 +1,119 @@
-# Retail Data Warehouse
+# GSME Muse
 
-**Fizza Hussain · 24i2621**  
-DS3003 & DS3004 · Fall 2026
+Local-first, source-grounded FAQ, manufacturing-document and tapeout-schedule assistant.
 
-Near-real-time online sales, hourly physical-store batches, and a two-relation MESHJOIN.
+## Start locally (Windows PowerShell)
 
-## 1. Install the prerequisites
-
-Use Python 3.10 or newer and MySQL 8.0.16 or newer. MySQL 8.4 LTS is recommended.
-
-The implementation uses InnoDB, enforced `CHECK` constraints, CTEs, and window functions. Dependencies are pinned to the tested versions. The PyMySQL RSA extra supports the default MySQL 8 password-authentication handshake.
-
-Run commands from the extracted project folder, which contains the six submission folders.
+Use Python 3.11+ and Docker Desktop with Linux containers. From this directory:
 
 ```powershell
 python -m venv .venv
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-# macOS / Linux: use this instead
-# source .venv/bin/activate
-python -m pip install -r Mesh-Join/requirements.txt
+.\.venv\Scripts\python.exe -m pip install --upgrade "pip>=26.2"
+.\.venv\Scripts\python.exe -m pip install -e ".[storage,hosted,test]"
+Copy-Item .env.example .env  # First setup only; never overwrite an existing .env.
+docker compose -f compose.local.yaml up -d
+.\.venv\Scripts\python.exe -m gsme_rag.hosted.app
 ```
 
-Start the MySQL service. Open MySQL Workbench or the MySQL client with your own account:
+Configure the local database URL/password and the required provider keys in your real `.env` before launching. Never commit it. The launcher applies additive database migrations.
 
-```bash
-mysql -u YOUR_MYSQL_USER -p
+- **Chatbot:** http://127.0.0.1:8020
+- **Operator console:** run `.\.venv\Scripts\python.exe -m gsme_rag.storage.admin`, then open http://127.0.0.1:8010/admin
+- **Operator source-search screen:** http://127.0.0.1:8010
+- **Parsing-only preview:** `python -m gsme_rag.api.run` is a separate application, not the complete chatbot.
+
+If a port is occupied, use the existing server or stop its original terminal before restarting. Do not start a second copy.
+
+## Admin workspace
+
+Open **http://127.0.0.1:8010/admin** after starting the operator console. Connect once using your local operator token; keep this service private.
+
+- **Documents:** find a source by name, add a file, or click **Update** to preserve its logical identity. Version history and IDs are tucked away. Shared publication always needs explicit confirmation.
+- **Source review:** starts with **Needs review**, not every accepted/excluded chunk. Filter by source page, compare the original PDF/image beside the text, select the displayed page/table passages and record one checked-source note for the group. A page shortcut selects only displayed pending passages, skips missing-link answers, and never approves unseen records.
+- **Jobs & logs:** see recent parsing/indexing work, stored failure reasons and enrolled automatic retry times. Open a job's document without copying IDs. Failed local parsing can be retried separately; no embedding is authorized by refreshing jobs or retrying local parsing.
+- **Test search:** inspect retrieved evidence and before/after reranking positions. Real provider requests still need explicit content permission; **Local demo** is clearly marked as synthetic.
+- **Schedules:** inspect exact rows in a readable table, with the raw response available for provenance.
+
+**FastAPI / Swagger:** use **API reference** in the sidebar, or open http://127.0.0.1:8010/docs. Protected API calls require the operator token in the `X-GSME-Token` header; the admin page supplies it after you connect. Office files need Word/Excel or a downloaded original because the browser has no native Office preview.
+
+## What searches what?
+
+**Chat** uses dense semantic vectors plus BM25 keyword search, rank fusion, Cohere reranking, and cited answers. Hosted chat explicitly enables hybrid retrieval. The legacy `GSME_HYBRID` flag controls other entry points; it does not turn hosted hybrid off. Default candidate/result limits are 30 and 5; source context can be added separately. Relevance scores are not correctness probabilities.
+
+**Tapeout schedules** uses exact PostgreSQL records: Full/Shared kind, technology, exact flavor, milestone dates and calendar filters. No LLM invents a tapeout date. These are imported source snapshots, not live booking availability.
+
+Example schedule questions:
+
+- `Show both schedules`
+- `Show shared 28nm schedules flavor "HPC+ RF" between 2026-11-01 and 2026-12-31`
+- `Show shared final deadlines before 2026-11-01`
+- `Next 3 full tapeout dates`
+
+Relative dates depend on the displayed as-of date and timezone (default Asia/Karachi). Select one milestone per date lookup. Conflicting or unsupported constraints request clarification.
+
+## Ingest and update documents
+
+The chatbot **+** uploads a new owner-only document to its browser workspace. Parsing and approved-text indexing advance automatically. Wait for Ready to chat. Supported inputs: PDF, DOCX, PPTX, XLSX, CSV and images, up to the hosted upload limit of 20 MiB.
+
+**A filename is not an identity.** Uploading the same filename through + is not a shared-library replacement.
+
+To update a shared FAQ, PDF or schedule:
+
+1. Open the authenticated local operator console and select the current document.
+2. Click **Update selected document**. This preserves its logical document ID.
+3. Choose the replacement file and ingest. Pick Full/Shared for a schedule CSV.
+4. Check the extracted text/rows. Authorize external processing only when permitted.
+5. Explicitly confirm and click **Publish shared version** for that exact current version.
+
+New questions/rows in an updated source are included in its replacement snapshot. Removed rows stop appearing in current schedule search. Previous versions/originals remain for provenance. Identical content with the same document ID and extraction profile is a no-op; changed parser settings may require a new version.
+
+There is no automatic folder watcher. Updates require submission. Shared publication is pinned to a version, so a temporary visibility gap can occur between promotion and explicit republication; this is not a zero-downtime deployment promise.
+
+## Source fidelity and review
+
+Ordinary clean text may be accepted by an automatic policy; that is **not human source verification**. OCR, inferred tables, damaged fonts, formulas and uncertain chart associations remain held until source-checked. Generic visual-gap placeholders are never embedded.
+
+An HTTP 200 conversion or an indexed document does not prove complete PDF coverage. Inspect the original, normalized Markdown, warnings/diagnostics and held units in the operator console. Never approve everything just to make a status green.
+
+Tesseract with English data is required for local OCR. Optional layout parsing:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[pdf]"
 ```
 
-Create a dedicated database. The account used by Python must have privileges to create and drop project tables and views, read and write rows, and create foreign keys in this database.
+Use the actual `strategy_used` value: a native fallback is not a successful Docling validation.
 
-```sql
-CREATE DATABASE IF NOT EXISTS retail_dw CHARACTER SET utf8mb4;
-USE retail_dw;
+## Models, storage and logs
+
+- Document embeddings: Cohere `embed-v5.0-pro`; query embeddings: `embed-v5.0-fast`; default 1,024 dimensions.
+- Reranking: configured Cohere reranker, required for generated document answers.
+- Answers: configured Cohere Command or optional Gemini adapter; Ollama is an optional operational answer fallback. Changing the answer provider does not remove embedding/reranking dependencies.
+- PostgreSQL owns versions, acceptance/reviews, schedules, jobs and chat history.
+- Qdrant holds the derived vector/text index.
+- `data/` holds originals, normalized artifacts and `logs/console.log`.
+
+Use a reply's **Request details** and request ID to correlate server logs. Quota exhaustion is not repaired by retries, a new upload, or assumed account switching. Keep company-content permissions separate for embedding, reranking, answers and optional vision providers.
+
+## Test and audit
+
+```powershell
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests
+.\.venv\Scripts\python.exe -B tools/verify_hosted_ui.py --guest
+.\.venv\Scripts\python.exe -B tools/verify_hosted_ui.py
+.\.venv\Scripts\python.exe -B tools/verify_console_ui.py
+.\.venv\Scripts\python.exe -m pip check
 ```
 
-Never use a database containing important unrelated work. `RESET` removes the project's tables, views, facts, staging data, and audit history. The creation script does not drop other databases.
+Database integration tests require `GSME_TEST_DATABASE_URL` pointing to a **separate database whose name starts with `gsme_rag_test`**, and `GSME_TEST_QDRANT_URL`. Original-source tests also require their documented fixture paths; skipped tests are not passes. Browser tools use isolated synthetic fixtures, not a real provider-quality benchmark.
 
-## 2. Prepare the actual source data
+Live evaluations need explicit source approval, a bounded request budget and available provider quota. Keep source-specific reports under ignored `validation/`; do not publish confidential extracts. Unit tests, live ranking metrics, source-coverage checks and human/agent answer judgments are different forms of evidence.
 
-The original workbook is included as `Data/Online_Retail.xlsx`. To reproduce cleaning and all prepared files before starting the live runtime:
+## Security and demo limits
 
-```bash
-python Mesh-Join/prepare.py Data/Online_Retail.xlsx --downloaded-on 2026-11-08
-```
+The operator console is loopback-only and token-authenticated. Keep it, PostgreSQL and Qdrant off the public internet. Hosted source authorization is checked before candidate retrieval, provider transmission and source opening. Office archive expansion is bounded before format parsing.
 
-This prints raw and cleaned counts, generates both transaction forms, creates the two master CSVs, and records the workbook SHA-256. It preserves valid repeated invoice lines. No random attributes or manual cleaning are used. CSV IDs are text; customer ID `17850` is hashed without a trailing `.0`. The first customer country and longest product description use original source row order; description-length ties keep the first occurrence.
+Public FAQs are intentionally guest-accessible. Browser uploads are owner-only through an opaque seven-day session, not a verified company identity. Clearing cookies loses access; it does not automatically erase server files. Google Workspace sign-in requires real company OAuth configuration.
 
-Expected results for the included workbook:
+For company hosting, configure HTTPS, persistent storage, backups/restores, retention, service monitoring, provider capacity and the intended access policy. The existing Dockerfile/Render descriptor launches the **legacy parsing preview**; it is not a production deployment of the hosted chatbot.
 
-| Check | Expected |
-|---|---:|
-| Raw lines | 541,909 |
-| Retained lines | 397,884 |
-| Online / periodic | 278,740 / 119,144 |
-| Customer / product master rows | 4,338 / 3,665 |
-| Customer / product pages | 9 / 8 |
-| Periodic groups | 48 |
-| Smallest / largest group | 2,482 / 2,483 |
-| Revenue, GBP | 8,911,407.904000 |
-
-## 3. Create the DW and start the program
-
-```bash
-python Mesh-Join/app.py
-```
-
-Optional stream-rate parameters (each must be 1-10,000 transactions per second; defaults are the required 80 and 10):
-
-```bash
-python Mesh-Join/app.py --peak-rate 80 --non-peak-rate 10
-```
-
-Enter the host, port, database, username, password, and online file path when prompted. The password is requested with `getpass` and is never embedded in a project file. Press Enter at the online-file prompt to use the included `Data/online_sales_stream.csv`.
-
-On the first run, type `RESET`. At the raw-workbook prompt:
-
-- Enter `Data/Online_Retail.xlsx` to demonstrate cleaning and regenerate the data, then enter `2026-11-08` as the actual source download date.
-- Press Enter to use the reproducible prepared files already included.
-
-The program executes `Create-DW/create_dw.sql`, dropping the old project objects before creating them. It loads master and staging data, then starts exactly three worker threads: `OnlineThread`, `PeriodicThread`, and `MeshJoinThread`. Dimensions load before facts in the same transaction. You can also execute the creation SQL separately in Workbench after selecting the database, but do not rerun it after loading if you want to retain the facts.
-
-Startup prints current mode and speed, both configured rates (80/s and 10/s by default), a 60-second hour, page/chunk size of 500, buffer capacity of 1,000, and the actual master page counts. Join settings are fixed, not credential prompts.
-
-## 4. Use the runtime commands
-
-| Command | Effect |
-|---|---|
-| `online` | Admit online input only; pause periodic extraction and shed replay. |
-| `periodic` | Admit periodic input; pause the online reader. |
-| `both` | Admit both; select online buffer entries first. |
-| `peak` | Select the configured peak online rate. A full-buffer overload can shed queued periodic rows. |
-| `non-peak` | Select the configured non-peak online rate; permit disk replay after fresh input. |
-| `rate peak <n>` / `rate non-peak <n>` | Change that stream rate (transactions per second) while running. |
-| `status` | Print modes, rate, buffer count, H count, queue chunks, shed count, pending joins, and facts. |
-| `quit` | Stop producers, finish accepted in-memory joins, and close connections. |
-
-Modes control new source admission; transactions already in the buffer or H finish both passes. Changing mode does not cancel or relabel them. Stream-buffer capacity is shared between both input queues.
-
-Group 0 may release immediately. Groups 1–47 release no earlier than the following hourly boundaries; pausing does not release all overdue groups in a burst. Each group is selected as one database batch. A released flag prevents duplicate extraction. If transfer takes longer than an hour, the next release is delayed rather than extracting overlapping groups.
-
-Periodic joined rows wait in a durable detail outbox, `joined_periodic`. The MESHJOIN worker flushes it at the same 60-second cadence. A row not fully joined by a boundary loads at a later boundary, never as an incomplete fact. Online rows load directly after joining. **Bonus live cache: not used.** The outbox is only for mandatory periodic loading, not a second fact table.
-
-## 5. Finish and reconcile a complete live run
-
-Keep `both` and `peak` while the online input is active. There are 278,740 online lines, so 80/s alone needs at least 3,484.25 seconds (about 58.1 minutes), plus any backpressure. The last periodic group is scheduled no earlier than minute 47. This full run cannot be presented as a one-minute demonstration.
-
-Once `online_eof` is true, use `both` and `non-peak` so shed periodic rows can replay. Wait for an hourly load boundary. Completion requires all of these:
-
-- `fact_rows` = 397,884 and `online_eof` = `true`
-- `stream_buffer`, `H`, `shed_disk`, `joined_periodic`, and `unreleased_periodic` all = 0
-
-Then inspect the reconciliation SQL below and enter `quit`:
-
-```sql
-SELECT COUNT(*) AS lines, SUM(quantity) AS units, SUM(revenue) AS revenue
-FROM fact_sales;
-
-SELECT sales_mode, processing_mode, COUNT(*) AS lines
-FROM fact_sales
-GROUP BY sales_mode, processing_mode;
-
-SELECT COUNT(*) AS bad_revenue
-FROM fact_sales
-WHERE revenue <> quantity * unit_price;
-
-SELECT event_kind, speed, SUM(row_count) AS lines
-FROM audit_events
-GROUP BY event_kind, speed;
-```
-
-The required channel counts are Online/Live = 278,740 and Periodic/Periodic = 119,144; `bad_revenue` must be zero.
-
-**Recorded live run at the required defaults (80 / 10 per second, 60-second hour).** The online file finished at 23:06:15 (about 58 minutes) with 350,242 facts loaded. Periodic rows shed to disk at peak: **47,642**. After switching to `non-peak`, all **47,642** were replayed, joined and loaded; the last hourly load completed at 23:44:24. The `audit_events` totals were: `periodic_release` 119,144; `periodic_load` at peak 71,502 and at non-peak 47,642 (71,502 + 47,642 = 119,144); `shed_to_disk` (peak) 47,642; `shed_replayed` (non-peak) 47,642. The final status showed 397,884 facts (278,740 online, 119,144 periodic) with the stream buffer, H, queue, shed table, joined periodic and unreleased periodic all at 0. Shed volume depends on machine speed, so a rerun will give a different count; the invariant is that every shed row is replayed and the fact count ends at 397,884.
-
-The fresh accelerated replay in `verify.py` records 72,500 periodic rows shed in peak mode and all 72,500 replayed in non-peak mode. That replay has no wall-clock delays and is not evidence of timing.
-
-## 6. Quit, resume, and failure handling
-
-On a later run, press Enter instead of `RESET` to resume. Keep the same source files, order, and credentials. Online input rereads from the beginning with stable `O:<line>` identities; a unique fact source key makes retries idempotent. Periodic sources use `P:<sorted-line>` identities. Identical business lines remain distinct because their source identities differ.
-
-Graceful quit drains admitted memory, but periodic results still await an hourly load. They remain durable in the outbox across restart. Resume resets released flags only for rows with no fact, shed record, or joined output. A crash during transfer is therefore recoverable.
-
-Do not change source CSV contents or reorder them during resume; use `RESET` after changing the dataset. Resume favors correctness over an optimized online file checkpoint.
-
-Each worker owns its own connection. Errors are printed and stop input; missing master IDs raise an error instead of silently dropping sales. Inspect status and fix the cause before resuming. A worker connection failure is also reported rather than leaving startup waiting.
-
-## 7. Execute all twenty queries
-
-After a complete load, select `retail_dw` and open and run `Queries-DW/olap_queries.sql` in Workbench, or use:
-
-```bash
-mysql -u YOUR_MYSQL_USER -p retail_dw < Queries-DW/olap_queries.sql
-```
-
-Use the classic MySQL client for the redirection example. Q20 creates `STORE_QUARTERLY_SALES` and orders the `SELECT` reading it. Q14 groups by calendar year; Q18 keeps both half-year and full-year totals within each calendar year. Q1 follows an annual top-five cohort by month; Q11 reranks the top five every month. Q7 averages line purchase amount. Q19 uses the mean of sale-active daily totals and also reports the 374-calendar-day mean for transparency. Q9, Q12, and Q15 use calendar-period grids and return `NULL` for missing or zero comparison denominators.
-
-Analysis year = 2011. Latest six months = July 1–December 9, 2011. December is partial; Q4 and the 2011 full-year totals are also partial. Historical 2010 contains December only. Synthetic demographic and channel attributes must not be interpreted as real observed behavior.
-
-## 8. Reproduce verification separately
-
-Six focused invariant tests require no database:
-
-```bash
-python -m unittest discover -s Mesh-Join -p "test_*.py" -v
-```
-
-For a full, accelerated integration replay, first create a **different disposable database**, for example `retail_verify`. Then:
-
-```bash
-python Mesh-Join/verify.py
-```
-
-Enter its credentials and type the displayed reset confirmation. This utility uses the actual MESHJOIN, shedding and loader code; checks row count and exact decimal revenue conservation, repeated-source idempotency and buffer capacity; executes all twenty queries; and writes the result CSVs and a JSON summary under `Project-Report/verification-results/` (created when the utility runs). It never touches the runtime database.
-
-The replay deliberately schedules producers without wall-clock sleeps. It does **not** replace `app.py` and is not evidence of a full timed run. The timed live-run evidence is the run described in section 5.
-
-## 9. Files and report
-
-| Folder | Contents |
-|---|---|
-| `Create-DW` | Destructive, repeatable project schema SQL. |
-| `Mesh-Join` | Complete Python source, dependencies, invariant tests and the replay utility `verify.py`. |
-| `Queries-DW` | All twenty numbered OLAP queries in one SQL script. |
-| `Data` | Original workbook, online/master CSVs, periodic import CSV, counts, and source note. |
-| `Project-Report` | The project report (PDF), including the star schema diagram, query results and run evidence. |
-| `README` | These operating instructions. |
-
-The extra periodic CSV makes staging reproducible; operational periodic input is extracted from `periodic_sales_data`, not streamed from that CSV. Master CSVs are preparation outputs; production MESHJOIN reads database pages, never whole-master Python dictionaries.
-
-## Dataset citation
-
-Chen, D., Sain, S. L., and Guo, K. *Online Retail*. UCI Machine Learning Repository.  
-<https://archive.ics.uci.edu/dataset/352/online+retail>  
-DOI: <https://doi.org/10.24432/C5BW33>  
-Downloaded: **8 November 2026**. Licensed CC BY 4.0. Derived deterministic attributes are specified by the assignment and are not original UCI measurements.
+Never commit real secrets, company originals, vectors or evaluation extracts. Do not delete `data/` or Docker volumes as repository cleanup. See CHANGELOG.md and the generated Word handover for current verification results and remaining limitations.

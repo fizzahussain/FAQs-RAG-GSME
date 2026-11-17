@@ -14,7 +14,7 @@ class Settings:
     batch_size: int = 16
     worker_batch: int = 8
     lease_seconds: int = 300  # A worker heartbeats this lease while a long task runs.
-    hybrid_enabled: bool = False
+    hybrid_enabled: bool = False  # Legacy entry points; hosted chat explicitly enables hybrid.
     rerank_model: str = "rerank-v5.0-pro"
     rerank_timeout: float = 30.0
     rerank_input_budget: int = 8192

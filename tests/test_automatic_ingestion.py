@@ -19,6 +19,35 @@ from gsme_rag.storage.postgres import EvidenceStore, _chunk_warning_codes, _page
 
 
 class AutomaticAcceptanceTests(TestCase):
+    def test_embedding_configuration_errors_are_specific_and_never_retryable(self):
+        from gsme_rag.storage.providers import CohereEmbeddings, ProviderConfigurationError
+        for key, approved, code in [("", "yes", "embedding_key_missing"),
+                                    ("synthetic-secret", "no", "embedding_content_not_approved")]:
+            with self.subTest(code=code), patch.dict(os.environ, {
+                    "COHERE_API_KEY": key, "GSME_EXTERNAL_CONTENT_APPROVED": approved}):
+                with self.assertRaises(ProviderConfigurationError) as caught:
+                    CohereEmbeddings(1024)
+                self.assertEqual(caught.exception.error_code, code)
+                self.assertFalse(caught.exception.retryable)
+                self.assertNotIn("synthetic-secret", str(caught.exception))
+
+    def test_provider_errors_distinguish_cooldown_from_permanent_failures(self):
+        from gsme_rag.storage.providers import CohereEmbeddings
+        class Failure(Exception):
+            def __init__(self, status, message):
+                self.status_code=status; self.body={"message":message}; self.headers={"Retry-After":"75"}
+        rate=CohereEmbeddings._failure("token count",Failure(429,"Too many requests per minute"))
+        self.assertTrue(rate.retryable)
+        self.assertEqual(rate.retry_after_seconds,75)
+        self.assertEqual(rate.error_code,"rate_limit")
+        for status,message,code in [(429,"Monthly quota exceeded","quota_exhausted"),
+                                    (429,"Trial key limit is 1000 API calls / month","quota_exhausted"),
+                                    (429,"Trial key limit is 1000 API calls per month","quota_exhausted"),
+                                    (401,"Invalid key","credentials"),(403,"Access denied","credentials")]:
+            error=CohereEmbeddings._failure("embedding",Failure(status,message))
+            self.assertFalse(error.retryable)
+            self.assertEqual(error.error_code,code)
+
     def test_region_warnings_do_not_block_unrelated_clean_prose(self):
         codes = ["ocr_needs_review", "table_needs_review", "visual_evidence_missing",
                  "formula_table_needs_review", "figure_needs_review"]

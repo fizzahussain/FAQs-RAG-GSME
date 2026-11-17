@@ -1,6 +1,7 @@
 """Regression cases for images, review provenance, routing and larger input."""
 from io import BytesIO
 from pathlib import Path
+import os
 import shutil
 import tempfile
 import unittest
@@ -67,7 +68,9 @@ class OCRStressTests(unittest.TestCase):
 
     @unittest.skipUnless(find_tesseract(), "Tesseract is required for OCR integration")
     def test_validation_raster_preserves_lot_a17(self):
-        path = Path(__file__).resolve().parents[1] / "examples" / "GSME_Parsing_Validation_0.14.3.pdf"
+        path = Path(os.getenv("GSME_TEST_VALIDATION_PDF", str(Path(__file__).resolve().parents[1] / "examples" / "GSME_Parsing_Validation_0.14.3.pdf")))
+        if not path.is_file():
+            self.skipTest("Set GSME_TEST_VALIDATION_PDF to the original three-page validation PDF")
         with pymupdf.open(path) as document:
             image = next(item for item in document[1].get_image_info(xrefs=True) if item.get("xref"))
             image_bytes = document.extract_image(image["xref"])["image"]

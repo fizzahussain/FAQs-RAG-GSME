@@ -7,23 +7,18 @@ charts/images stay review evidence; no visual associations are inferred.
 from datetime import date, datetime, time
 from hashlib import sha256
 from pathlib import Path
-from zipfile import ZipFile
 from lxml import etree
 
 from gsme_rag.models import EvidenceDiagnostic, ParsedDocument, ParseWarning
 from gsme_rag.parsing.fidelity import _reason as fidelity_reason
 from gsme_rag.parsing.links import markdown_link
 from gsme_rag.parsing.markdown import finish_markdown, render_markdown_table
+from gsme_rag.parsing.limits import validate_office_container
 
 
 def check_package(path):
     """Reject excessive decompression before constructing an Office object tree."""
-    with ZipFile(path) as package:
-        entries = package.infolist()
-        if len(entries) > 10000 or sum(e.file_size for e in entries) > 128 * 1024 * 1024:
-            raise ValueError("Office package exceeds the bounded extraction limit; split the source")
-        if any(e.flag_bits & 1 for e in entries):
-            raise ValueError("Encrypted Office packages are not supported")
+    validate_office_container(Path(path))
 
 
 def review(text, reason):

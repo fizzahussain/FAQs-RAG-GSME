@@ -18,7 +18,8 @@ FIELDS = {"request_id", "route", "method", "status", "elapsed_ms", "error_type",
           "indexed", "failed", "candidates", "results", "missing_settings", "version",
           "question_hash", "query_chars", "document_id", "eligible", "hits", "ranked_chunks",
           "retrieval_status", "answer_status", "cited_sources", "fallback_used", "warning_codes",
-          "failure_reason", "context_chars", "collection", "min_rerank_score"}
+          "failure_reason", "context_chars", "collection", "min_rerank_score",
+          "context_fingerprint", "answer_fingerprint", "cache_hit"}
 
 
 def emit(event: str, *, level=logging.INFO, **fields):

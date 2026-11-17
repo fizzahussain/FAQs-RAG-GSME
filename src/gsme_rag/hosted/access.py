@@ -80,7 +80,7 @@ class AccessStore:
             if not row:
                 return False
             document = row["id"]
-            db.execute("""UPDATE ingestion_jobs SET state='failed',claimed_at=NULL,
+            db.execute("""UPDATE ingestion_jobs SET state='failed',claimed_at=NULL,hosted_auto_process=false,
                 last_error='Upload removed by owner',updated_at=now()
                 WHERE version_id IN (SELECT id FROM document_versions WHERE document_id=%s)""", (document,))
             db.execute("""UPDATE index_jobs SET state='superseded',updated_at=now()
@@ -133,6 +133,28 @@ class AccessStore:
         self._tenant(tenant)
         return self.visible_version(version) and self.store.is_source_current_approved(tenant, version, chunk)
 
+    def approved_source_keys(self, identities):
+        """One access-checked snapshot for a history page, not one connection per quote."""
+        if not identities:
+            return set()
+        clause, params = self._clause()
+        keys = sorted(identities)
+        with self.store.connect() as db:
+            rows = db.execute("""SELECT c.version_id,c.source_chunk_id FROM approved_current_evidence c
+                JOIN document_versions v ON v.id=c.version_id JOIN documents d ON d.id=v.document_id
+                JOIN document_access a ON a.document_id=d.id
+                JOIN unnest(%s::uuid[],%s::text[]) AS wanted(version_id,chunk_id)
+                  ON wanted.version_id=c.version_id AND wanted.chunk_id=c.source_chunk_id
+                WHERE c.tenant_id=%s AND a.tenant_id=%s""" + clause,
+                [[v for v, _ in keys], [c for _, c in keys], self.tenant, self.tenant] + params).fetchall()
+        return {(str(r["version_id"]), r["source_chunk_id"]) for r in rows}
+
+    def comparison_context(self, tenant, version, chunk):
+        self._tenant(tenant)
+        if not self.visible_version(version):
+            return []
+        return self.store.comparison_context(tenant, version, chunk)
+
     def inspect_version(self, tenant, version, limit=1):
         self._tenant(tenant)
         return self.store.inspect_version(tenant, version, limit) if self.visible_version(version) else None
@@ -144,8 +166,13 @@ class AccessStore:
                 (SELECT count(*) FROM evidence_chunks c WHERE c.version_id=v.id AND c.evidence_status='approved') AS accepted,
                 (SELECT count(DISTINCT j.chunk_id) FROM index_jobs j JOIN evidence_chunks c ON c.id=j.chunk_id
                  WHERE c.version_id=v.id AND j.state='indexed') AS indexed,
-                a.visibility,a.deletion_protected,(a.owner_subject=%s) AS owned FROM document_versions v
+                a.visibility,a.deletion_protected,i.hosted_auto_process AS automatic_processing,
+                i.hosted_error_code AS processing_error,
+                CASE WHEN i.hosted_auto_process THEN GREATEST(0,ceil(extract(epoch FROM
+                    (i.hosted_next_attempt_at-now()))))::int ELSE 0 END AS retry_after_seconds,
+                (a.owner_subject=%s) AS owned FROM document_versions v
                 JOIN documents d ON d.id=v.document_id JOIN document_access a ON a.document_id=d.id
+                JOIN ingestion_jobs i ON i.version_id=v.id
                 WHERE d.tenant_id=%s AND a.tenant_id=%s AND
                 (d.current_version_id=v.id OR (a.owner_subject=%s AND v.state NOT IN ('superseded')))
                 """ + clause + " AND (a.visibility<>'company_schedule' OR a.owner_subject=%s) ORDER BY v.created_at DESC LIMIT 101",

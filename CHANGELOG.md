@@ -1,0 +1,66 @@
+# GSME Muse changes
+
+## 0.19.11 — clear stage questions and source scopes
+
+- Traced the saved manufacturing-stage question: hybrid retrieval correctly ranked MFG-GSME-0002 page 18 first and the manufacturing presentation page 11 second. Command requested clarification, and the app displayed a generic aspect/document prompt despite having both source definitions.
+- The generation instruction now distinguishes manufacturing-operation stages from stages before market readiness instead of merging them or requesting vague clarification. A narrow recovery for basic three-stage listing questions returns only intact, explicitly enumerated source sentences when the model requests clarification. Actual stage names are copied from evidence, not hard-coded. Each scope keeps its own citation.
+- Extra question constraints, uncertain OCR/table evidence, incomplete enumerations, same-scope conflicting sentences, insufficient-evidence responses and revoked sources are not overridden. No second model call, new retrieval, re-embedding or external API request is needed for recovery. The clarification-recovery event is recorded without question/source text.
+- Added targeted JSON/streaming regressions and locally replayed the exact saved question, retrieval passages and model clarification with current approval/access rechecks. The replay answers with fabrication/assembly/testing and separately reports MPW/Engineering Sample/Mass Production, citing original pages 18 and 11. This is local regression verification, not a new live Cohere evaluation.
+- Verification: 83 answer-generation, streaming and hosted regressions passed with real isolated local services, no failures/errors/skips. The final nine-test hosted resource/API recheck also passed, including the newly added real answer-handler/source-card regression. Prompt wording was kept compact so intact reviewed-table evidence still fits the unchanged prompt budget. No documents, embeddings, persisted chat replies or provider settings were changed; restart the chatbot process to load this code.
+
+## 0.19.10 — simpler admin workspace
+
+- Rebuilt the operator portal with a teal/cream sidebar, task-based navigation, searchable document cards, readable states and a clearly labelled demo/live processing mode. Routine work no longer requires copying document/job IDs; version history and low-level tools are collapsed.
+- Source review defaults to pending evidence. Status/page filtering happens in PostgreSQL before pagination, and summary counts remain document-wide. Group shortcuts select only displayed pending passages and skip missing-link answers. Selections/confirmation reset on filter, page, version and workspace changes; source verification and reviewer authorization remain mandatory.
+- Added local side-by-side PDF/raster previews and page navigation, plus explicit Office download fallback. PDF page images are rendered locally after source-hash/page validation, with bounded dimensions, no-store provenance headers and no OCR/model calls or cached files. Blob URLs and previews clear when the source/workspace changes. Source text remains inert; no raw evidence HTML is executed.
+- Added a read-only authenticated tenant-scoped jobs endpoint and Jobs & logs screen, including exact source-version navigation, stored provider reasons, retry-enrollment timestamps and explicit local parse retry. Queue refresh does not advance work or call a model. Index authorization and public library sharing remain separate.
+- Added readable schedule results with raw provenance retained, and a visible FastAPI reference link. Existing source-search home and API boundaries are preserved.
+- Added API/integration regressions for authorization, filter bounds, pre-pagination filtering and tenant isolation; extended real Edge browser coverage for document navigation, review filters, page-group selection, local previews, workspace reset and responsive layouts. No new live provider evaluation or company-content transmission is part of this UI release.
+- Verification: 387-test regression run passed (421.411 seconds, no failures/errors/skips). The PDF-rendering regression was added afterward and included in the final 10-test admin/API recheck with real local services; all ten passed without skips. The final Edge workflow passed desktop/mobile checks, decoded an actual local PDF-page image, and reported no browser errors or external requests. JavaScript syntax and whitespace checks passed. README and the existing Word handover were updated; no new credentials or document embeddings were created.
+
+## 0.19.9 — source, update-workflow and security audit
+
+- Fixed explicit Full/Shared selection being rejected for single-kind XLSX schedule ingestion. Added a real PostgreSQL/Qdrant regression alongside archive-limit tests.
+- Bound DOCX/PPTX/XLSX archive expansion before early spreadsheet classification and format parsing; reject oversized, encrypted, duplicate or unsafe entries.
+- Recognize exact acronym expansions such as `TSMC = Taiwan Semiconductor Manufacturing Company` in diagnostic copies only. Preserve original text and retain broken-font, OCR, table and actual formula review gates. Parser version is now 0.18.2.
+- Added operator-console **Update selected document** and explicitly confirmed **Publish shared version** controls. Shared publication is token/origin protected and checks the exact current document/version. Ordinary chatbot uploads remain separate owner-only documents.
+- Exposed the actual hybrid strategy in chat diagnostics. Hosted chat already enables dense + BM25 regardless of the legacy `GSME_HYBRID` setting.
+- The live pilot exposed an answer blending wafer die-sorting outputs into a parametric-test answer despite valid quotes. Added an explicit subtype-preservation instruction and a narrow fail-closed parametric-output source-scope regression; exact quotations alone are not semantic proof.
+- Replaced the unrelated README with the GSME setup, storage, update, trust-boundary and deployment guide. Updated the Word handover builder rather than adding duplicate guide folders.
+- Updated vulnerable installed dependencies: OpenTelemetry API 1.45.2, SoupSieve 4.0 and pip 26.3. Added relevant dependency floors. The post-update advisory scan found no known vulnerabilities; this is not a security certification. Static-analysis findings require contextual review, not blanket suppression.
+- Source audit: the 188-page manufacturing PDF produces 802 units, 544 review-marked and 197 excluded, with no units exceeding 1,800 characters. A local parser-0.18.2 policy check identifies 220 eligible sections versus the current stored version's 218. The existing shared version has NOT been replaced or re-embedded by this audit. Table/visual/OCR coverage remains incomplete.
+- Version replacement retains originals and provenance but is not zero-downtime: current-version promotion and exact shared publication are separate steps. Company hosting, real OAuth and full technical-source review remain operational work.
+- Bounded real Cohere pilot completed with 102 HTTP attempts, 40 search attempts and 20 answers, no document re-embedding. Hybrid positive hit@1 10/12, hit@5 12/12; dense hit@1 9/11 and hit@5 11/11 on successful positives, with the twelfth search rate-limited and retained. All four unsupported and four known held-coverage questions abstained. A09's scope error remains a recorded failure, and A07's added technical qualifier remains a fidelity concern. Post-pilot scope/prompt fixes are locally tested, not live-retested beyond the authorized ceiling.
+- Source schedule acceptance passed 44/44 checks against the exact CSV/workbook values as of 2026-11-17. The audit tool now accepts a reproducible reference date and derives its independent relative-date oracle from that date rather than hard-coded November 10 boundaries.
+- Final verification: 385 tests passed in 395.595 seconds, zero failures/errors/skips, using isolated real PostgreSQL/Qdrant and available original source PDFs. Operator, guest and mocked-sign-in browser checks passed. Word structure was checked; its visual pagination was not rendered. Live provider limits and incomplete technical-source coverage remain explicit limitations, not passing completeness claims.
+
+## 0.19.8 — explicit schedule workspace and interface polish
+
+- Removed the “Source-linked answers” badge; added compact Chat / Tapeout schedules navigation and a calmer teal/blue palette.
+- Connected the schedule workspace to the existing access-filtered exact SQL endpoint, with optional milestone/date filters, conflict/empty-source messages, row provenance and authorized source previews. Schedule lookups do not use embeddings/reranking or get saved as chat turns.
+- Approved schedule uploads show “Ready for schedule search”, not a misleading embedding retry; schedule files do not appear as semantic-only document scopes.
+- Added real-browser upload/search/isolation/mobile regressions and an owner-only schedule API regression. Added a source-backed demonstration script and question bank to the existing Word handover.
+- The existing local 47-row workbook has no hosted publication/owner policy. It remains inaccessible to public readers; uploading a schedule into a browser workspace does not make it public.
+- Verification: 376 tests passed without failures/errors/skips; guest and mocked-sign-in browser checks passed. All 47 parsed workbook rows match stored records. No real external model calls; Word layout rendering remains unverified.
+- Documentation correction: hosted chat explicitly enables hybrid dense + BM25 retrieval regardless of the legacy `GSME_HYBRID` flag. Added a regression assertion and clarified the example configuration. The user's two exact schedule CSVs are now the published local shared sources; use their existing logical document IDs for replacements.
+- Added a shared-schedule replacement regression: identical source submission is a no-op; changed bytes require explicit republication, replace the current row set, and retain superseded originals for inspection. This also records the temporary visibility gap during promotion rather than claiming zero downtime.
+
+## 0.19.7 — streamed, evidence-checked replies
+
+- Added `POST /api/chat/stream` using server-sent events; the existing JSON endpoint remains available.
+- Cohere, Gemini and local Ollama adapters support real provider streaming. Only complete claims that pass the existing source/citation/numeric checks are shown provisionally; the complete response still needs final schema and access validation.
+- Added bounded stream queues/concurrency, safe errors, disconnect cancellation and a Stop button. Interrupted or invalid drafts are removed, not saved as successful answers. Blocking SDK reads remain subject to their configured timeouts; cancellation is not an instantaneous thread kill.
+- “Fabless vs IDP” now discloses a conditional IDM interpretation. Original question and interpretation remain inspectable; other acronyms are not generally autocorrected.
+- A clear, basic Fabless/IDM comparison with both approved definitions can return verbatim source sentences if the model requests unnecessary clarification. Extra cost/date/technical constraints disable this narrow extractive fallback.
+- Added brief upload/source help: use **+**, wait for **Ready to chat**, and leave **All files** selected unless narrowing the search.
+- Added incremental-parser, SDK-protocol, real local HTTP, cancellation, source-revocation and browser-stream regression coverage. No live company-content model calls are part of those synthetic tests.
+- Updated the detailed Word handover and its reproducible builder. See its verification record for exact run results and limitations.
+
+## 0.19.6 — saved chats and comparison context
+
+- Collapsible desktop sidebar and mobile drawer; Muse wordmark in place of the single-letter mark.
+- Owner-scoped PostgreSQL chat history with switching, rename/delete, reload persistence and batched current-source access checks.
+- Bounded cross-page approved prose expansion for explicit source comparisons; contextual siblings are identified separately from reranked vector hits.
+- Prevented introductory model-name text from supporting an IDM ownership claim. Preserved table/OCR/formula review gates.
+
+Neither increment makes a general semantic-entailment or production-readiness guarantee. Restart the hosted launcher after updating; it applies additive migrations before serving.
