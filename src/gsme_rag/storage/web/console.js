@@ -339,7 +339,7 @@ async function loadInspection() {
     card.append(title, selectionLabel, context, text);
     if (chunk.warning_codes.length) { const warnings = document.createElement("p"); warnings.className="error";
       warnings.textContent = chunk.warning_codes.includes("link_target_missing") ? "This answer refers to 'here' without a usable destination. Get the original link; do not guess it." : "Source checks: " + chunk.warning_codes.map(code=>code.replaceAll("_"," ")).join(", "); card.append(warnings); }
-    if(chunk.approval_basis==="automatic_clean_text_v1" && chunk.evidence_status==="approved") {
+    if(["automatic_clean_text_v1","automatic_clean_text_v2"].includes(chunk.approval_basis) && chunk.evidence_status==="approved") {
       const accepted=document.createElement("p"); accepted.className="muted";
       accepted.textContent="Accepted automatically as clean text. No human source check is claimed; no review note is needed.";
       const override=document.createElement("details"), summary=document.createElement("summary");

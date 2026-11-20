@@ -50,17 +50,28 @@ class AutomaticAcceptanceTests(TestCase):
 
     def test_region_warnings_do_not_block_unrelated_clean_prose(self):
         codes = ["ocr_needs_review", "table_needs_review", "visual_evidence_missing",
-                 "formula_table_needs_review", "figure_needs_review"]
+                 "formula_table_needs_review", "figure_needs_review", "pdf_table_inferred"]
         self.assertEqual(_chunk_warning_codes(codes, "section", False), [])
         self.assertTrue(clean_text_eligible("Selectable source paragraph.", "section", False,
             warning_codes=_chunk_warning_codes(codes, "section", False)))
-        for kind, review in [("section", True), ("table_row", True), ("table_row", False), ("visual_gap", True)]:
+        self.assertEqual(_chunk_warning_codes(codes, "paragraph", False), [])
+        self.assertTrue(clean_text_eligible("Ordinary PDF paragraph.", "paragraph", False,
+            warning_codes=_chunk_warning_codes(codes, "paragraph", False)))
+        for kind, review in [("section", True), ("paragraph", True), ("table_row", True),
+                             ("table_row", False), ("visual_gap", True)]:
             self.assertEqual(_chunk_warning_codes(codes, kind, review), sorted(codes))
         for code in ["text_fidelity_needs_review", "vector_content_needs_review", "link_target_missing", "unknown_warning"]:
             self.assertEqual(_chunk_warning_codes(codes + [code], "section", False), [code])
+            self.assertFalse(clean_text_eligible("Paragraph with unresolved diagnostic.", "paragraph", False,
+                warning_codes=_chunk_warning_codes(codes + [code], "paragraph", False)))
 
     def test_only_clean_text_is_automatic(self):
         self.assertTrue(clean_text_eligible("Normal source prose.", "section", False))
+        self.assertTrue(clean_text_eligible("A simple selectable-text PDF paragraph.", "paragraph", False))
+        self.assertFalse(clean_text_eligible("A simple selectable-text PDF paragraph.", "paragraph", False,
+            policy_basis="automatic_clean_text_v1"))
+        self.assertFalse(clean_text_eligible("A paragraph with uncertain OCR.", "paragraph", True))
+        self.assertFalse(clean_text_eligible("An ordinary paragraph with a damaged glyph \ufffd.", "paragraph", False))
         self.assertTrue(clean_text_eligible("Find [here](<https://example.invalid/?lot=A17>).", "question_answer", False))
         for text, kind, review, status, warnings in [
             ("OCR LOT A17", "section", True, "pending", []),
@@ -103,6 +114,21 @@ class AutomaticIngestionIntegrationTests(TestCase):
             self.addCleanup(self._cleanup_vectors, settings.collection + "_synthetic")
             store = EvidenceStore(DB)
             store.migrate()
+            # PostgreSQL must enforce the same clean-paragraph policy as Python.
+            with store.connect() as db:
+                allowed = db.execute("""SELECT evidence_acceptance_allowed(
+                    false,'automatic_clean_text_v2',false,%s::jsonb,'paragraph',%s) AS allowed""",
+                    (json.dumps(["visual_evidence_missing", "pdf_table_inferred"]),
+                     "Ordinary selectable paragraph on a page with an unrelated figure.")).fetchone()["allowed"]
+                held = db.execute("""SELECT evidence_acceptance_allowed(
+                    false,'automatic_clean_text_v2',true,'[]'::jsonb,'paragraph',%s) AS allowed""",
+                    ("OCR reading needs review",)).fetchone()["allowed"]
+                legacy_paragraph = db.execute("""SELECT evidence_acceptance_allowed(
+                    false,'automatic_clean_text_v1',false,'[]'::jsonb,'paragraph',%s) AS allowed""",
+                    ("Legacy policy did not accept paragraph chunks.",)).fetchone()["allowed"]
+                self.assertTrue(allowed)
+                self.assertFalse(held)
+                self.assertFalse(legacy_paragraph)
             source = Path(temporary) / "mixed.docx"
             doc = Document()
             for question, answer in [("Who coordinates the synthetic service?", "Muse coordinates the synthetic service."),
