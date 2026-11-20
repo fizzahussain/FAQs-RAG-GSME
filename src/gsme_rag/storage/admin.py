@@ -1,12 +1,11 @@
-"""Explicitly local, authenticated operator UI for reviewed evidence.
-
-This app is intentionally separate from the public parsing demo. Never mount it
-in gsme_rag.api.app or bind it to a non-loopback interface.
-"""
+"""Loopback operator console; remote operation requires an explicit HTTPS gate."""
 
 from __future__ import annotations
 
 import hmac
+import html
+import base64
+import binascii
 import ipaddress
 import json
 import math
@@ -16,12 +15,13 @@ from pathlib import Path
 import tempfile
 from typing import Literal, Annotated
 from uuid import UUID, uuid4
+from urllib.parse import urlsplit
 from datetime import date
 from collections import deque
 from contextlib import contextmanager
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, Query
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AfterValidator, StringConstraints
 import psycopg
@@ -171,12 +171,18 @@ def _safe(action):
         raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else "Source unavailable") from None
 
 
-def create_admin_app(settings: Settings | None = None, store: EvidenceStore | None = None) -> FastAPI:
+def create_admin_app(settings: Settings | None = None, store: EvidenceStore | None = None,
+                     *, remote_origin: str | None = None) -> FastAPI:
     settings = settings or from_env()
     store = store or EvidenceStore(settings.database_url)
     secret = os.getenv("GSME_REVIEW_AUTH_TOKEN", "")
     if len(secret) < 20:
         raise ValueError("Set GSME_REVIEW_AUTH_TOKEN to a random secret of at least 20 characters")
+    if remote_origin:
+        origin = urlsplit(remote_origin)
+        if (origin.scheme != "https" or not origin.hostname or origin.path or origin.query
+                or origin.fragment or origin.username or origin.password or len(secret) < 32):
+            raise ValueError("Remote administration requires an HTTPS origin and an operator secret of at least 32 characters")
 
     app = FastAPI(title="GSME Local Evidence Console", version=__version__)
     web = Path(__file__).with_name("web")
@@ -203,6 +209,27 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
+        if remote_origin:
+            # Protect HTML, assets, docs and every API, not only mutation routes.
+            # Browser Basic credentials remain scoped to /operator/ over HTTPS.
+            valid = False
+            try:
+                scheme, encoded = request.headers.get("authorization", "").split(" ", 1)
+                username, password = base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)
+                valid = (scheme.lower() == "basic" and hmac.compare_digest(username.encode(), b"operator")
+                         and hmac.compare_digest(password.encode(), secret.encode()))
+            except (ValueError, UnicodeError, binascii.Error):
+                pass
+            if not valid:
+                return JSONResponse({"detail": "Operator sign-in required"}, status_code=401,
+                                    headers={"WWW-Authenticate": 'Basic realm="GSME operator", charset="UTF-8"',
+                                             "Cache-Control": "no-store"})
+            if request.headers.get("origin") not in (None, remote_origin):
+                return JSONResponse({"detail": "Cross-origin request denied"}, status_code=403)
+            request.state.operator_authenticated = True
+            response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store"
+            return response
         try:
             local = ipaddress.ip_address(request.client.host).is_loopback
         except (AttributeError, ValueError):
@@ -214,8 +241,10 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
     def authorize(request: Request, x_gsme_token: str | None = Header(default=None)):
         # Header authentication plus origin check prevents cross-site form requests.
         origin = request.headers.get("origin")
-        if origin and origin != str(request.base_url).rstrip("/"):
+        if origin and origin != (remote_origin or str(request.base_url).rstrip("/")):
             raise HTTPException(403, "Cross-origin request denied")
+        if remote_origin and getattr(request.state, "operator_authenticated", False):
+            return
         if not x_gsme_token or not hmac.compare_digest(x_gsme_token.encode(), secret.encode()):
             raise HTTPException(401, "Local operator token required")
 
@@ -234,12 +263,27 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
             REQUEST_ID.reset(token)
 
     @app.get("/", include_in_schema=False)
-    def home():
-        return FileResponse(web / "search.html", media_type="text/html", headers={"Cache-Control": "no-store"})
+    def home(request: Request):
+        return console_page("search.html", request)
 
     @app.get("/admin", include_in_schema=False)
-    def operator_console():
-        return FileResponse(web / "index.html", media_type="text/html")
+    def operator_console(request: Request):
+        return console_page("index.html", request)
+
+    def console_page(filename, request):
+        prefix = request.scope.get("root_path", "").rstrip("/")
+        if not prefix:
+            return FileResponse(web / filename, media_type="text/html", headers={"Cache-Control": "no-store"})
+        content = (web / filename).read_text(encoding="utf-8")
+        # These are fixed same-service links in packaged HTML, not user input.
+        content = content.replace('href="/', f'href="{prefix}/').replace('src="/', f'src="{prefix}/')
+        content = content.replace("Local operator access only", "Authenticated operator access")
+        content = content.replace("Enter your local operator token from .env.",
+                                  "Signed in as operator. The token field can remain empty.")
+        content = content.replace('value="local-test"',
+                                  'value="' + html.escape(os.getenv("GSME_HOSTED_TENANT", "company"), quote=True) + '"')
+        content = content.replace('autocomplete="off" required', 'autocomplete="off"')
+        return HTMLResponse(content, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/health", dependencies=[Depends(authorize)])
     def health():
@@ -322,6 +366,18 @@ def create_admin_app(settings: Settings | None = None, store: EvidenceStore | No
             raise HTTPException(404, "Version not found for tenant")
         value["index_jobs"] = store.index_status(tenant, version_id)
         return value
+
+    @app.get("/api/coverage/{version_id}", dependencies=[Depends(authorize)])
+    def coverage(version_id: Identifier, tenant: Tenant):
+        from gsme_rag.storage.coverage import document_coverage
+
+        try:
+            report = document_coverage(store, tenant, version_id)
+        except ValueError:
+            raise HTTPException(409, "Source or artifacts changed; investigate integrity before reviewing this version") from None
+        if report is None:
+            raise HTTPException(404, "Version not found for tenant")
+        return report
 
     @app.get("/api/markdown/{version_id}", dependencies=[Depends(authorize)])
     def markdown(version_id: Identifier, tenant: Tenant):

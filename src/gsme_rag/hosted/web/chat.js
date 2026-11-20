@@ -11,6 +11,18 @@ let activeChat = null, historyEnabled = false, chats = [];
 let chatNavigationEpoch = 0;
 let chatController = null;
 let searchMode = "chat";
+let previousScheduleFilters = null;
+
+function resetScheduleSearch() {
+  previousScheduleFilters = null;
+  for (const id of ["schedule-kind", "schedule-date-field", "schedule-from", "schedule-to"]) $(id).value = "";
+  $("schedule-results").replaceChildren();
+}
+$("reset-schedules").onclick = () => {
+  if (busy || uploadBusy) return;
+  resetScheduleSearch();
+  $("notice").textContent = "Schedule filters cleared. Start a new Full, Shared or both lookup.";
+};
 
 function setSearchMode(mode) {
   if (busy || uploadBusy) return;
@@ -24,9 +36,9 @@ function setSearchMode(mode) {
   $("messages").hidden = schedules;
   $("welcome").hidden = schedules || $("messages").children.length > 0;
   $("chat-title").textContent = schedules ? "Tapeout schedules" : chats.find(c => c.id === activeChat)?.title || "Document chat";
-  $("question").placeholder = schedules ? 'e.g. Show shared 28nm schedules flavor "HPC+ RF"' : "Ask about your documents…";
+  $("question").placeholder = schedules ? 'e.g. Show shared 180nm schedules with flavor MS RF G' : "Ask about your documents…";
   $("send").querySelector("span").textContent = schedules ? "Search" : "Send";
-  $("search-hint").textContent = schedules ? "Exact source rows · Asia/Karachi · Lookups are not saved in chat history." : "Check the sources. Questions are searched independently.";
+  $("search-hint").textContent = schedules ? "Exact source rows · Asia/Karachi · Lookups are not saved in chat history." : "Follow-ups use recent questions. Answers search current sources.";
   $("notice").textContent = schedules ? "Choose Full, Shared or both in your question or the Schedule menu. Upload a schedule CSV/XLSX if none is available." : "Ask about your available documents.";
   $("notice").classList.remove("error");
   $("jump-latest").hidden = true;
@@ -87,6 +99,7 @@ function resizeComposer() {
 }
 $("question").addEventListener("input", resizeComposer);
 function resetConversation() {
+  resetScheduleSearch();
   chatNavigationEpoch++;
   activeChat = null;
   $("chat-title").textContent = "New chat";
@@ -154,7 +167,7 @@ async function openChat(id, restoring = false) {
   setSearchMode("chat"); resetConversation(); activeChat = data.id; $("chat-title").textContent = data.title;
   for (const turn of data.turns) { message("user", turn.question); answerMessage(turn.response); }
   renderChats(); if (!restoring) closeNavigation(); scrollLatest(true);
-  $("notice").textContent = "Saved conversation. Each new question searches current documents independently.";
+  $("notice").textContent = "Saved conversation. Follow-ups use recent questions and search current documents.";
 }
 for (const button of document.querySelectorAll("[data-question]")) button.onclick = () => {
   $("question").value = button.dataset.question; resizeComposer(); $("question").focus();
@@ -178,6 +191,7 @@ function controls() {
   $("attach").disabled = !initialized || uploadBusy || !config.uploads_enabled;
   $("sidebar-upload").disabled = $("attach").disabled;
   $("new-chat").disabled = !initialized || busy || uploadBusy;
+  $("reset-schedules").disabled = !initialized || busy || uploadBusy;
   $("ask").setAttribute("aria-busy", String(busy));
   $("stop-reply").hidden = !busy;
   $("mode-chat").disabled = $("mode-schedules").disabled = !initialized || busy || uploadBusy;
@@ -226,6 +240,12 @@ function message(kind, text) {
 
 function answerMessage(result) {
   const box = message("assistant", ""), text = box.querySelector("p"), targets = new Map();
+  if (result.query_context) {
+    const details = document.createElement("details"), title = document.createElement("summary"), query = document.createElement("p");
+    title.textContent = "Question used for search";
+    query.textContent = result.query_context.search_question;
+    details.append(title, query); box.append(details);
+  }
   if (result.retrieval_fallback_used) {
     const notice = document.createElement("p");
     notice.className = "muted";
@@ -289,6 +309,7 @@ function answerMessage(result) {
 }
 
 function clearPrivateState() {
+  resetScheduleSearch();
   chatController?.abort();
   clearTimeout(libraryTimer);
   progressVersion = "";
@@ -486,6 +507,15 @@ async function resumeAndWatch(version) {
 
 function schedule(box, result) {
   if (result.status === "clarification_needed") { box.querySelector("p").textContent = result.message; return; }
+  if (result.filters) {
+    const f = result.filters, active = document.createElement("p"); active.className = "citation";
+    const labels = [f.schedule_kind, f.technology_nm ? `${f.technology_nm} nm` : "all technologies",
+      f.flavor ? `flavor ${f.flavor}` : "all flavors", f.date_field.replaceAll("_", " "),
+      f.date_from ? `from ${f.date_from}` : "", f.date_to ? `through ${f.date_to}` : "",
+      f.next_dates ? `next ${f.next_dates} distinct dates` : "", f.deadline_status !== "all" ? f.deadline_status : ""];
+    active.textContent = `${result.context_applied ? "Refined search" : "Active filters"}: ${labels.filter(Boolean).join(" · ")}`;
+    box.append(active);
+  }
   if (!result.results.length) {
     box.querySelector("p").textContent = result.sources?.length ? "No matching schedule records. Try a different date, technology or flavor." : "No schedule source is available in this workspace. Upload your Full/Shared CSV or schedule workbook using +. Existing private or unpublished schedules are not exposed automatically.";
     return;
@@ -519,6 +549,7 @@ function schedule(box, result) {
 
 async function runScheduleSearch(question, epoch) {
   const body = {question, limit:100};
+  if (previousScheduleFilters) body.previous_filters = previousScheduleFilters;
   for (const [id, key] of [["schedule-kind", "schedule_kind"], ["schedule-date-field", "date_field"],
     ["schedule-from", "date_from"], ["schedule-to", "date_to"]]) {
     if ($(id).value) body[key] = $(id).value;
@@ -530,8 +561,15 @@ async function runScheduleSearch(question, epoch) {
   const result = await (await api("schedules/search", {method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify(body), signal:chatController.signal})).json();
   if (epoch !== sessionEpoch) return;
+  if (["results", "no_matching_rows"].includes(result.status)) {
+    // Carry filters only. Every follow-up rechecks current rows and permissions.
+    previousScheduleFilters = Object.fromEntries(
+      ["schedule_kind", "technology_nm", "flavor", "date_field", "date_from", "date_to", "deadline_status", "next_dates"]
+        .map(key => [key, result.filters[key]]));
+  }
   title.textContent = question; schedule(box, result);
-  $("notice").textContent = "Schedule lookup complete. Imported records are not live booking availability.";
+  $("notice").textContent = result.status === "clarification_needed" ? "Please clarify your schedule filters. The previous lookup is unchanged." :
+    "Schedule lookup complete. You can refine it with ‘Only 180nm’ or ‘What about Shared?’";
 }
 
 $("refresh").onclick = () => library().catch(showError);
@@ -582,6 +620,7 @@ $("question").addEventListener("keydown", event => {
 $("ask").onsubmit = async event => {
   event.preventDefault(); if (!initialized || busy || uploadBusy) return;
   const epoch = sessionEpoch, question = $("question").value.trim(); if (!question) return;
+  $("question").value = ""; resizeComposer();
   if (searchMode === "schedules") {
     busy = true; controls(); chatController = new AbortController();
     try { await runScheduleSearch(question, epoch); }
@@ -594,7 +633,7 @@ $("ask").onsubmit = async event => {
     } finally { chatController = null; busy = false; controls(); }
     return;
   }
-  message("user", question); $("question").value = ""; resizeComposer(); busy = true; controls();
+  message("user", question); busy = true; controls();
   $("notice").classList.remove("error");
   const pending = message("assistant", "Searching your documents…"); pending.classList.add("thinking");
   const draftClaims = []; let interpretation = "";
@@ -688,7 +727,7 @@ $("signin").onclick = () => {
     config = await (await api("config")).json();
     if (config.guest_uploads_enabled) {
       await api("session", {method: "POST"});
-      $("workspace-note").textContent = "No sign-in needed. Your uploads are private to this browser workspace. Access expires after seven days or when cookies are cleared; files are not automatically deleted. Questions search documents independently.";
+      $("workspace-note").textContent = "No sign-in needed. Your uploads are private to this browser workspace. Access expires after seven days or when cookies are cleared; files are not automatically deleted. Follow-ups can use recent questions in the same chat.";
     }
     clearPrivateState(); await Promise.all([library(), loadChats()]);
     if (chats.length) await openChat(chats[0].id, true);

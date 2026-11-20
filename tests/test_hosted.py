@@ -14,12 +14,80 @@ from fastapi.testclient import TestClient
 from gsme_rag.hosted.access import AccessStore, Principal, publish_faq
 from gsme_rag.hosted.app import create_hosted_app, HostedSettings, cited_source_groups
 from gsme_rag.hosted.identity import google_principal, InvalidIdentity, IdentityUnavailable
+from gsme_rag.hosted.history import ChatHistory
 from gsme_rag.retrieval.reranking import FakeReranker
 from gsme_rag.storage.config import Settings
 from gsme_rag.storage.pipeline import process_ingestion, process_index
 from gsme_rag.storage.postgres import EvidenceStore
 from gsme_rag.storage.providers import FakeEmbeddings, ProviderOperationError, ProviderConfigurationError
 from gsme_rag.storage.vectors import QdrantEvidence
+
+
+class ConversationContextTests(TestCase):
+    def test_recent_context_is_owned_bounded_current_and_same_document(self):
+        store, scoped = Mock(), Mock()
+        db = MagicMock()
+        store.connect.return_value.__enter__ = Mock(return_value=db)
+        store.connect.return_value.__exit__ = Mock(return_value=False)
+        scoped.principal = Principal("browser:owner")
+        scoped.approved_source_keys.return_value = {("v", "c")}
+        db.execute.return_value.fetchone.return_value = {"id": "chat"}
+        response = {"document_id": "doc", "answer": {"status": "answered", "text": "ANSWER MUST NOT BECOME CONTEXT"},
+                    "results": [{"context_parts": [{"version_id": "v", "chunk_id": "c"}]}]}
+        turns = [{"question": "How does it work?", "response": response},
+                 {"question": "What is PCM?", "response": response}]
+        db.execute.return_value.fetchall.return_value = turns
+        history = ChatHistory(store, "tenant")
+        self.assertEqual(history.recent_questions("chat", scoped, "doc"),
+                         ["What is PCM?", "How does it work?"])
+        self.assertEqual(db.execute.call_args_list[0].args[1], ("chat", "tenant", "browser:owner"))
+        self.assertIn("LIMIT 3", db.execute.call_args.args[0])
+        self.assertEqual(history.recent_questions("chat", scoped, "other-doc"), [])
+        scoped.approved_source_keys.return_value = set()
+        self.assertEqual(history.recent_questions("chat", scoped, "doc"), [])
+        scoped.approved_source_keys.return_value = {("v", "c")}
+        turns[0] = {"question": "What is a new topic?", "response": {"answer": {"status": "request_failed"}}}
+        self.assertEqual(history.recent_questions("chat", scoped, "doc"), [])
+        db.execute.return_value.fetchone.return_value = None
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as error:
+            history.recent_questions("another-owners-chat", scoped, "doc")
+        self.assertEqual(error.exception.status_code, 404)
+
+    def test_followup_runs_fresh_retrieval_and_generation_and_new_topic_resets(self):
+        store = Mock(); store.connect.return_value = MagicMock()
+        settings = Settings("unused", "unused", Path("data"))
+        report = {"status": "results", "results": [], "rerank_input_count": 0, "timings_ms": {}}
+        with patch("gsme_rag.hosted.app.ChatHistory") as history_class, \
+             patch("gsme_rag.hosted.app.require_answer_permission"), \
+             patch("gsme_rag.hosted.app.CohereEmbeddings"), \
+             patch("gsme_rag.hosted.app.CohereReranker"), \
+             patch("gsme_rag.hosted.app.QdrantEvidence"), \
+             patch("gsme_rag.hosted.app.retrieve", return_value=report) as retrieve_mock, \
+             patch("gsme_rag.hosted.app.generate_answer", return_value={"status": "insufficient_evidence"}) as generate:
+            history_class.return_value.recent_questions.return_value = ["What is a fabless company?"]
+            with TestClient(create_hosted_app(settings, store=store, auto_worker=False),
+                            base_url="http://127.0.0.1:8020") as client:
+                chat_id = str(uuid4())
+                result = client.post("/api/chat", json={"question": "How is it different from an IDM?", "chat_id": chat_id}).json()
+                query = retrieve_mock.call_args.args[6]
+                self.assertIn("What is a fabless company?", query)
+                self.assertIn("How is it different from an IDM?", query)
+                self.assertEqual(generate.call_args.args[0], query)
+                self.assertEqual(result["query_context"]["history_count"], 1)
+                streamed = client.post("/api/chat/stream", json={
+                    "question": "How is it different from an IDM?", "chat_id": chat_id})
+                self.assertIn("event: done", streamed.text)
+                self.assertIn("bounded_user_question_context", streamed.text)
+                self.assertEqual(retrieve_mock.call_args.args[6], query)
+                history_class.return_value.recent_questions.reset_mock()
+                client.post("/api/chat", json={"question": "What is PCM?", "chat_id": chat_id})
+                self.assertEqual(retrieve_mock.call_args.args[6], "What is PCM?")
+                history_class.return_value.recent_questions.assert_not_called()
+                retrieve_mock.reset_mock(); generate.reset_mock()
+                result = client.post("/api/chat", json={"question": "How does it work?"}).json()
+                self.assertEqual(result["status"], "clarification_needed")
+                retrieve_mock.assert_not_called(); generate.assert_not_called()
 
 
 class HostedCitationTests(TestCase):
@@ -264,7 +332,7 @@ class HostedResourceTests(TestCase):
              patch("gsme_rag.hosted.app.CohereEmbeddings", return_value=provider), \
              patch("gsme_rag.hosted.app.CohereReranker", side_effect=ValueError("synthetic configuration error")):
             with TestClient(create_hosted_app(settings, store=store), base_url="http://127.0.0.1:8020") as client:
-                response = client.post("/api/chat", json={"question": "What does this mean?"})
+                response = client.post("/api/chat", json={"question": "What does PCM measure?"})
                 self.assertEqual(response.status_code, 400)
                 provider.client.__exit__.assert_called_once()
 

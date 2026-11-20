@@ -21,7 +21,7 @@
     <details id="file-panel"><summary>Processing &amp; file details</summary><div id="documents"></div></details>
     <div class="sidebar-footer">
       <details><summary>Upload &amp; source help</summary><p>Use + beside your message, or Upload document. Processing starts automatically. Wait for “Ready to chat” beside the filename before searching it.</p><p>All files searches your available collection. Choose a filename in Search in only to narrow the search. Click a sidebar filename to open it.</p><p>“Waiting for provider” resumes automatically. “Source review needed” requires the operator to check uncertain extraction; uploading again will not verify it.</p></details>
-      <details><summary>About your workspace</summary><p id="workspace-note">Files are opened locally in this app. Questions search approved document evidence independently.</p><p>PDF, Word, Excel, PowerPoint, CSV and images · up to 20 MiB. Accepted text may be sent to configured AI services. Uncertain extraction stays held.</p></details>
+      <details><summary>About your workspace</summary><p id="workspace-note">Follow-ups use recent questions in the same chat. Answers search current approved document evidence.</p><p>PDF, Word, Excel, PowerPoint, CSV and images · up to 20 MiB. Accepted text may be sent to configured AI services. Uncertain extraction stays held.</p></details>
       <button id="signin" class="secondary-button" hidden>Company sign-in</button><button id="signout" class="secondary-button" hidden>Sign out</button><div id="googleButton"></div>
       <span class="workspace-label"><span aria-hidden="true">●</span> Document workspace</span>
     </div>
@@ -46,6 +46,7 @@
           <p class="muted">Search imported Full and Shared schedules. Dates come from stored source rows, not an AI prediction or a live booking system.</p>
           <div class="schedule-examples" aria-label="Schedule examples"><button type="button" data-question="Show both schedules">All schedule records</button><button type="button" data-question="Next 3 full tapeout dates">Next Full dates</button><button type="button" data-question='Show shared 28nm schedules flavor "HPC+ RF"'>Shared 28 nm</button></div>
           <div id="schedule-results" aria-live="polite"></div>
+          <button id="reset-schedules" class="secondary-button" type="button">Clear schedule filters</button>
         </section>
       </div>
       <button id="jump-latest" class="secondary-button" type="button" hidden>Latest messages ↓</button>
@@ -58,7 +59,7 @@
         <label class="sr-only" for="question">Your question</label>
         <div class="composer"><button id="attach" type="button" aria-label="Upload a document" title="Upload a document" disabled>+</button><textarea id="question" rows="1" maxlength="4000" required placeholder="Ask about your documents…"></textarea><button id="stop-reply" type="button" hidden>Stop</button><button id="send" type="submit" disabled><span>Send</span> <span aria-hidden="true">↑</span></button></div>
       </form>
-      <div class="composer-hint"><span id="search-hint">Check the sources. Questions are searched independently.</span><span>Enter to send · Shift+Enter for a new line</span></div>
+      <div class="composer-hint"><span id="search-hint">Follow-ups use recent questions. Answers search current sources.</span><span>Enter to send · Shift+Enter for a new line</span></div>
     </div>
   </main>
   <form id="upload" hidden><input id="file" type="file" accept=".pdf,.docx,.pptx,.xlsx,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp" aria-label="Choose document" required><button id="upload-submit" disabled>Upload document</button></form>

@@ -12,7 +12,8 @@ from openpyxl import Workbook
 
 from gsme_rag.parsing import parse_to_markdown
 from gsme_rag.parsing.schedules import parse_schedule_workbook, parse_schedule_records
-from gsme_rag.retrieval.schedules import ScheduleQuery, plan_schedule, search_schedules, ScheduleSnapshotChanged
+from gsme_rag.retrieval.schedules import (ScheduleFilters, ScheduleQuery, plan_schedule,
+                                         search_schedules, ScheduleSnapshotChanged)
 from gsme_rag.storage.admin import create_admin_app
 from gsme_rag.storage.config import Settings
 
@@ -30,6 +31,153 @@ class SchedulePlanningTests(TestCase):
         self.assertEqual(errors, [])
         self.assertEqual((p.schedule_kind, p.technology_nm, p.flavor), ("shared", 28, "HPC+ RF"))
         self.assertEqual((p.date_from, p.date_to), (date(2026, 11, 1), date(2026, 12, 31)))
+
+    def context(self, question, previous=None, **kwargs):
+        planned, _, errors = self.plan(question, previous_filters=previous, **kwargs)
+        self.assertEqual(errors, [], question)
+        return planned, planned.model_dump(include=set(ScheduleFilters.model_fields))
+
+    def test_schedule_followups_change_only_requested_filters(self):
+        _, previous = self.context("Show full schedules between 2026-11-01 and 2026-12-31")
+        p, previous = self.context("Only 180nm", previous)
+        self.assertEqual((p.schedule_kind, p.technology_nm, p.date_from, p.date_to),
+                         ("full", 180, date(2026, 11, 1), date(2026, 12, 31)))
+        p, previous = self.context("What about Shared?", previous)
+        self.assertEqual((p.schedule_kind, p.technology_nm), ("shared", 180))
+        p, previous = self.context("And with flavor MS RF G", previous)
+        self.assertEqual((p.schedule_kind, p.technology_nm, p.flavor), ("shared", 180, "MS RF G"))
+        p, previous = self.context("And only final deadlines", previous)
+        self.assertEqual(p.date_field, "final_deadline")
+        p, previous = self.context("All flavors", previous)
+        self.assertIsNone(p.flavor)
+        p, previous = self.context("All technologies", previous)
+        self.assertIsNone(p.technology_nm)
+        p, previous = self.context("All dates", previous)
+        self.assertEqual((p.date_from, p.date_to, p.next_dates), (None, None, None))
+        # A standalone question deliberately starts fresh despite supplied history.
+        p, _ = self.context("Show full schedules", previous)
+        self.assertEqual((p.schedule_kind, p.technology_nm, p.flavor, p.date_field),
+                         ("full", None, None, "tapeout_date"))
+
+    def test_followup_date_replacement_and_explicit_filter_conflicts(self):
+        _, previous = self.context("Show shared 180nm schedules between 2026-11-01 and 2026-11-30")
+        for question in ("After 2026-12-01", "What about next month?", "Next two dates"):
+            p, _ = self.context(question, previous)
+            self.assertEqual((p.schedule_kind, p.technology_nm), ("shared", 180))
+            if question.startswith("After"):
+                self.assertEqual((p.date_from, p.date_to), (date(2026, 12, 2), None))
+            elif "month" in question:
+                self.assertEqual((p.date_from, p.date_to), (date(2026, 12, 1), date(2026, 12, 31)))
+            else:
+                self.assertEqual((p.next_dates, p.date_to), (2, None))
+        for question in ("Only 180nm", "What about Shared?"):
+            self.assertTrue(self.plan(question, previous_filters=previous,
+                                      schedule_kind="full", technology_nm=28)[2])
+        self.assertTrue(self.plan("Only 180nm")[2])
+        self.assertTrue(self.plan("Only 28nm or 65nm", previous_filters=previous)[2])
+        self.assertTrue(self.plan("And not 28nm", previous_filters=previous)[2])
+        with self.assertRaises(ValueError):
+            ScheduleQuery(question="Only 180nm", previous_filters={"tenant_id": "another-company"})
+        with self.assertRaises(ValueError):
+            ScheduleQuery(previous_filters={"date_from": "2026-12-31", "date_to": "2026-12-01"})
+
+    def test_clear_specific_filters_preserves_the_other_filters(self):
+        _, previous = self.context('Show shared 180nm schedules flavor "MS RF G" after 2026-11-01')
+        for question, field in (("Remove flavor filter", "flavor"),
+                                ("Remove the technology filter", "technology_nm"),
+                                ("Remove date filter", "date_from")):
+            p, _ = self.context(question, previous)
+            self.assertIsNone(getattr(p, field))
+            self.assertEqual(p.schedule_kind, "shared")
+
+    def test_followup_can_replace_status_and_reuse_explicit_milestone_context(self):
+        _, previous = self.context("Show full open final deadlines after 2026-11-01")
+        p, previous = self.context("Only closed deadlines", previous)
+        self.assertEqual((p.deadline_status, p.date_field), ("closed", "final_deadline"))
+        p, _ = self.context("All statuses", previous)
+        self.assertEqual(p.deadline_status, "all")
+        self.assertTrue(self.plan("Only open and closed deadlines", previous_filters=previous)[2])
+
+    def test_unquoted_flavors_preserve_identifiers_and_following_constraints(self):
+        for flavor in ("MS RF G", "HPC+ RF", "HV BCD Gen2", "FFC TUFP"):
+            for suffix in ("", " between 2026-11-01 and 2026-12-31"):
+                with self.subTest(flavor=flavor, suffix=suffix):
+                    question = f"Show shared 180nm schedules with flavor {flavor}{suffix}"
+                    plain, _, errors = self.plan(question)
+                    quoted, _, quoted_errors = self.plan(
+                        f'Show shared 180nm schedules with flavor "{flavor}"{suffix}')
+                    self.assertEqual(errors, [])
+                    self.assertEqual(quoted_errors, [])
+                    self.assertEqual(plain.flavor, flavor)
+                    self.assertEqual(plain.model_dump(exclude={"question"}),
+                                     quoted.model_dump(exclude={"question"}))
+        p, _, errors = self.plan("Show shared schedules flavor MS RF G final deadlines before 2026-12-01")
+        self.assertEqual(errors, [])
+        self.assertEqual((p.flavor, p.date_field, p.date_to),
+                         ("MS RF G", "final_deadline", date(2026, 11, 30)))
+        # Exclusions and conflicting explicit filters must remain visible.
+        for suffix in (" except 28nm", " or 65nm", " not 28nm"):
+            self.assertTrue(self.plan("Show shared 180nm schedules flavor MS RF G" + suffix)[2])
+        self.assertTrue(self.plan("Shared schedules flavor MS RF G", flavor="ULL")[2])
+        self.assertTrue(self.plan('Shared schedules flavor "MS RF G')[2])
+
+    def test_schedule_paraphrases_resolve_to_the_same_filters(self):
+        groups = [
+            ("Next shared tapeout", [
+                "When is the next Shared Block run?",
+                "Could you show me the nearest shared shuttle?",
+                "What is the soonest shared tape-out?",
+                "When is the earliest shared tape out?",
+                "When does the next shared tapeout happen?",
+                "Are there any next shared runs?",
+            ], {}),
+            ("Next 3 full tapeout dates after 2026-11-30", [
+                "Could you list the next three Full Block runs after 2026-11-30?",
+                "What are the nearest three full tape-outs after 2026-11-30?",
+            ], {}),
+            ("Shared schedules 180nm", [
+                "What options do you have for the shared 180-nanometer process?",
+                "Could you find shared runs for the 180 nanometre technology node?",
+            ], {}),
+            ("Shared schedules 180nm", [
+                "What options do you have for 180nm?",
+            ], {"schedule_kind": "shared"}),
+            ("Shared schedules 180nm flavor MS RF G", [
+                "Could you show shared 180nm options with flavor MS RF G?",
+                "Which shared 180nm schedules have flavour MS RF G?",
+                "Show shared 180nm schedules with flavor is MS RF G?",
+                "I'm looking for shared 180 nanometre runs with flavor MS RF G",
+                "Which shared 180nm flavor MS RF G dates are there?",
+            ], {}),
+        ]
+        for canonical, variants, kwargs in groups:
+            expected, _, errors = self.plan(canonical, **kwargs)
+            self.assertFalse(errors)
+            for question in variants:
+                with self.subTest(question=question):
+                    actual, _, errors = self.plan(question, **kwargs)
+                    self.assertEqual(errors, [])
+                    self.assertEqual(actual.model_dump(exclude={"question"}),
+                                     expected.model_dump(exclude={"question"}))
+                    self.assertEqual(actual.question, question)
+
+    def test_paraphrases_keep_unknown_constraints_and_flavor_text(self):
+        for question in (
+            "Could you show shared runs without 180nm?",
+            "What shared options do you have under 100 dollars?",
+            "Could you show the next two shared runs except 28nm?",
+            "What are the fastest shared runs?",
+            "Could you book a shared shuttle?",
+            "Could you show the next shared runs in December?",
+            "What options do you have for 180nm?",
+        ):
+            with self.subTest(question=question):
+                self.assertTrue(self.plan(question)[2])
+        p, _, errors = self.plan('Show shared schedules flavor "Next Gen2"')
+        self.assertEqual(errors, [])
+        self.assertEqual(p.flavor, "Next Gen2")
+        self.assertIsNone(p.next_dates)
+        self.assertTrue(self.plan("When is the next shared run?", schedule_kind="full")[2])
 
     def test_relative_calendar_windows_and_year_leap_boundaries(self):
         for phrase, start, end in [("today", "2026-11-10", "2026-11-10"),
@@ -67,7 +215,7 @@ class SchedulePlanningTests(TestCase):
                          "Shared schedules between 2026-12-01 and 2026-11-01",
                          "Shared schedules on 2026-02-30", "Shared schedules next 0 days",
                          "Shared schedules today and tomorrow", "Shared trial and final deadlines",
-                         "Shared schedules flavor HPC", "Shared schedules next 101 dates",
+                         "Shared schedules flavor", "Shared schedules next 101 dates",
                          "Shared schedules before 0001-01-01", "Shared deadlines"]:
             with self.subTest(question=question):
                 _, _, reasons = self.plan(question)
@@ -165,6 +313,40 @@ class ScheduleWorkbookTests(TestCase):
 
 
 class ScheduleApiTests(TestCase):
+    def test_hosted_followup_requeries_current_scope_without_models(self):
+        from gsme_rag.hosted.app import create_hosted_app
+        from unittest.mock import MagicMock
+        store, scoped = Mock(), Mock()
+        store.connect.return_value = MagicMock()
+        scoped.schedule_search.return_value = {"rows": [], "total": 0, "sources": ["current-version"]}
+        with patch("gsme_rag.hosted.app.AccessStore", return_value=scoped), \
+             patch("gsme_rag.hosted.app.CohereEmbeddings") as embedding, \
+             patch("gsme_rag.hosted.app.generate_answer") as answer:
+            with TestClient(create_hosted_app(Settings("unused", "unused", Path("data")),
+                                             store=store, auto_worker=False),
+                            base_url="http://127.0.0.1:8020") as client:
+                first = client.post("/api/schedules/search", json={
+                    "question": "Show full 180nm schedules", "as_of": "2026-11-20"}).json()
+                previous = {key: first["filters"][key] for key in ScheduleFilters.model_fields}
+                followup = client.post("/api/schedules/search", json={
+                    "question": "What about Shared?", "previous_filters": previous,
+                    "as_of": "2026-11-20"})
+                self.assertEqual(followup.status_code, 200)
+                self.assertTrue(followup.json()["context_applied"])
+                self.assertEqual(followup.json()["filters"]["schedule_kind"], "shared")
+                self.assertEqual(followup.json()["filters"]["technology_nm"], 180)
+                self.assertNotIn("previous_filters", followup.json()["filters"])
+                self.assertEqual(scoped.schedule_search.call_count, 2)
+                scoped.schedule_search.reset_mock()
+                ambiguous = client.post("/api/schedules/search", json={
+                    "question": "Only 28nm or 65nm", "previous_filters": previous})
+                self.assertEqual(ambiguous.json()["status"], "clarification_needed")
+                scoped.schedule_search.assert_not_called()
+                invalid = client.post("/api/schedules/search", json={
+                    "question": "Only 180nm", "previous_filters": {"tenant": "other"}})
+                self.assertEqual(invalid.status_code, 422)
+        embedding.assert_not_called(); answer.assert_not_called()
+
     def test_auth_local_search_catalog_validation_and_snapshot_conflict(self):
         store = Mock()
         store.schedule_search.return_value = {"rows": [], "total": 0, "sources": []}

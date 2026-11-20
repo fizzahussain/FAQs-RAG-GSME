@@ -1,4 +1,5 @@
 "use strict";
+const searchBase = new URL(".", document.currentScript.src).pathname.replace(/\/assets\/$/, "");
 const byId=id=>document.getElementById(id);
 let token="",workspace="",connected=false,busy=false,libraryRows=[],pendingIndex=null;
 const provider=()=>byId("searchProvider").value;
@@ -19,7 +20,7 @@ async function run(action){if(busy)return;busy=true;controls();try{await action(
 async function request(path,options={}){
   const headers={"X-GSME-Token":token};
   if(options.body && !(options.body instanceof FormData)) headers["Content-Type"]="application/json";
-  const response=await fetch("/api/"+path,{...options,headers});
+  const response=await fetch(searchBase+"/api/"+path,{...options,headers});
   if(!response.ok){let detail=response.statusText;try{detail=(await response.json()).detail;}catch(_){/* No JSON error body. */}
     const id=response.headers.get("X-GSME-Request-ID");throw new Error((typeof detail==="string"?detail:JSON.stringify(detail))+(id?` [request ${id}]`:""));}
   return response;
@@ -57,7 +58,7 @@ async function refreshLibrary(){
 }
 byId("loginForm").onsubmit=event=>{event.preventDefault();run(async()=>{
   token=byId("accessToken").value.trim();workspace=byId("workspace").value.trim();
-  if(!token || !workspace)throw new Error("Enter your local token and workspace.");
+  if((!token && !searchBase) || !workspace)throw new Error("Enter your operator token and workspace.");
   const health=await json("health");await refreshLibrary();connected=true;
   byId("answerConsentLabel").lastChild.textContent=` Also generate a cited answer using ${health.answer_provider==="gemini"?"Google Gemini":"Cohere Command"}, with local Ollama fallback if unavailable`;
   byId("login").hidden=true;byId("ask").hidden=false;modeChanged();

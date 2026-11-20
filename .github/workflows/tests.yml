@@ -1,0 +1,79 @@
+name: Project checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: gsme_test
+          POSTGRES_PASSWORD: isolated-ci-only
+          POSTGRES_DB: gsme_rag_test_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gsme_test -d gsme_rag_test_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      qdrant:
+        image: qdrant/qdrant:v1.20.0
+        ports:
+          - 6333:6333
+    env:
+      GSME_TEST_DATABASE_URL: postgresql://gsme_test:isolated-ci-only@127.0.0.1:5432/gsme_rag_test_ci
+      GSME_TEST_QDRANT_URL: http://127.0.0.1:6333
+      COHERE_API_KEY: ""
+      GEMINI_API_KEY: ""
+      GSME_QDRANT_API_KEY: ""
+      GSME_EXTERNAL_CONTENT_APPROVED: "no"
+      GSME_RERANK_CONTENT_APPROVED: "no"
+      GSME_ANSWER_CONTENT_APPROVED: "no"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and local OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          python -m pip install --upgrade pip
+          python -m pip install ".[storage,hosted,test]"
+      - name: Check dependencies
+        run: python -m pip check
+      - name: Wait for vector service
+        run: |
+          python - <<'PY'
+          import time
+          import urllib.request
+          for attempt in range(30):
+              try:
+                  urllib.request.urlopen("http://127.0.0.1:6333/healthz", timeout=2).close()
+                  break
+              except OSError:
+                  if attempt == 29:
+                      raise
+                  time.sleep(2)
+          PY
+      - name: Unit and isolated integration tests
+        run: python -B -m unittest discover -s tests -v
+      - name: Browser script syntax
+        run: |
+          node --check src/gsme_rag/hosted/web/chat.js
+          node --check src/gsme_rag/storage/web/console.js
+          node --check src/gsme_rag/storage/web/search.js
+      - name: Build application image and check OCR imports
+        run: |
+          docker build --tag gsme-muse:ci .
+          docker run --rm gsme-muse:ci python -c "import gsme_rag.hosted.deploy; from gsme_rag.parsing.ocr import tesseract_environment; assert tesseract_environment()['english_available']"

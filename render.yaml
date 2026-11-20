@@ -1,6 +1,25 @@
 services:
   - type: web
-    name: gsme-rag-demo
+    name: gsme-muse
     runtime: docker
-    plan: free
-    healthCheckPath: /v1/health
+    plan: starter
+    healthCheckPath: /health/ready
+    disk:
+      name: gsme-evidence
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: GSME_DATA_DIR
+        value: /var/data/gsme
+      - key: GSME_DATABASE_URL
+        sync: false
+      - key: GSME_QDRANT_URL
+        sync: false
+      - key: GSME_QDRANT_API_KEY
+        sync: false
+      - key: COHERE_API_KEY
+        sync: false
+      - key: GSME_HOSTED_ADMIN_ENABLED
+        value: "no"
+      - key: GSME_REVIEW_AUTH_TOKEN
+        generateValue: true

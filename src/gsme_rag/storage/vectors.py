@@ -2,11 +2,16 @@
 
 from qdrant_client import QdrantClient, models
 import math
+import os
 
 
 class QdrantEvidence:
-    def __init__(self, url: str, collection: str, dimension: int, hybrid: bool = False):
-        self.client = QdrantClient(url=url, timeout=30)
+    def __init__(self, url: str, collection: str, dimension: int, hybrid: bool = False, timeout: float = 30):
+        # A managed Qdrant key belongs in server configuration, never a URL or UI.
+        key = os.getenv("GSME_QDRANT_API_KEY") or None
+        if key and not url.startswith("https://"):
+            raise ValueError("Authenticated Qdrant connections require HTTPS")
+        self.client = QdrantClient(url=url, api_key=key, timeout=timeout)
         self.collection = collection
         self.dimension = dimension
         self.hybrid = hybrid

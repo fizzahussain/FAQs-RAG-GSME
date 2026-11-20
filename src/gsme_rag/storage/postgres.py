@@ -292,6 +292,21 @@ class EvidenceStore:
                     "review_manifest_path": str(Path(version["artifact_path"]).with_name(
                         "review_manifest.json")) if version["artifact_path"] else None}
 
+    def coverage_rows(self, tenant_id: str, version_id: str) -> list[dict]:
+        """Aggregate the entire version, independently of the review UI's page."""
+        with self.connect() as db:
+            return db.execute("""SELECT c.source_page_start AS page_start,
+                COALESCE(c.source_page_end,c.source_page_start) AS page_end,
+                c.evidence_status,c.review_required,count(*) AS chunks,
+                count(*) FILTER (WHERE r.decision='approved' AND r.source_verified) AS verified_chunks
+                FROM evidence_chunks c JOIN document_versions v ON v.id=c.version_id
+                JOIN documents d ON d.id=v.document_id LEFT JOIN LATERAL (
+                    SELECT decision,source_verified FROM review_decisions WHERE chunk_id=c.id
+                    ORDER BY decision_order DESC LIMIT 1) r ON true
+                WHERE d.tenant_id=%s AND v.id=%s
+                GROUP BY c.source_page_start,c.source_page_end,c.evidence_status,c.review_required""",
+                (tenant_id, version_id)).fetchall()
+
     def list_versions(self, tenant_id: str, limit: int = 50) -> list[dict]:
         if not tenant_id.strip() or not 1 <= limit <= 100:
             raise ValueError("Tenant and bounded limit are required")

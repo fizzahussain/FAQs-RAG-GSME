@@ -1,4 +1,5 @@
 "use strict";
+const consoleBase = new URL(".", document.currentScript.src).pathname.replace(/\/assets\/$/, "");
 const el = id => document.getElementById(id);
 const value = id => el(id).value.trim();
 let offset = 0, nextOffset = null, inspection = null, dimension = 1024, connected = false;
@@ -48,7 +49,7 @@ const evidenceText=window.gsmeEvidence;
 async function api(path, options = {}) {
   const headers = {"X-GSME-Token": value("token")};
   if (options.body && !(options.body instanceof FormData)) headers["Content-Type"] = "application/json";
-  const response = await fetch("/api/" + path, {...options, headers});
+  const response = await fetch(consoleBase + "/api/" + path, {...options, headers});
   if (!response.ok) {
     let detail = response.statusText;
     try { detail = (await response.json()).detail; } catch (_) { /* HTTP text is enough. */ }
@@ -90,7 +91,7 @@ function updateControls() {
   el("modeState").textContent=value("provider")==="fake" ? "Local demo · synthetic vectors" : "Cohere · live provider";
   el("modeState").className=value("provider")==="fake" ? "badge warning" : "badge";
   for(const id of ["newUpload","refreshJobs","documentSearch"]) el(id).disabled=!connected;
-  for(const id of ["openReview","reviewStatus","reviewPage","clearReviewFilters"]) el(id).disabled=!connected || !inspection;
+  for(const id of ["openReview","reviewStatus","reviewPage","clearReviewFilters","coverage"]) el(id).disabled=!connected || !inspection;
   for(const id of ["ingest","retry","jobStatus"]) el(id).disabled=!connected || !value("job");
   el("closePreview").disabled=!previewUrl;
   el("replaceSelected").disabled=!connected || !inspection;
@@ -252,6 +253,7 @@ async function loadVersions() {
   renderDocuments();
 }
 async function loadInspection() {
+  el("coverageReport").replaceChildren();
   if(previewVersion && previewVersion!==value("version")) clearPreview();
   el("confirmShare").checked=false; el("shareSummary").textContent="";
   selectedChunks.clear(); selectionChanged(); el("batchNote").value="";
@@ -368,6 +370,25 @@ async function reviewSelected(decision) {
 }
 el("approveSelected").onclick=()=>run(()=>reviewSelected("approved"));
 el("rejectSelected").onclick=()=>run(()=>reviewSelected("rejected"));
+el("coverage").onclick = () => run(async () => {
+  const report=await json(versionPath("coverage")), root=el("coverageReport");root.replaceChildren();
+  const summary=document.createElement("p");
+  summary.textContent=`${report.source_page_count ?? "Unknown number of"} source pages · ${report.pages_summarized} summarized · ${report.unattributed_chunks} passages without page attribution. Source ${report.source_available ? (report.source_readable ? "present" : "present but unreadable") : "missing"}; normalized text ${report.normalized_available ? "present" : "missing"}; warnings manifest ${report.manifest_available ? "present" : "missing"}.`;
+  root.append(summary);
+  const note=document.createElement("p");note.className="muted";note.textContent=report.note;root.append(note);
+  if(report.page_display_truncated) {const warning=document.createElement("p");warning.textContent="Display limited to the first 5,000 pages.";root.append(warning);}
+  const table=document.createElement("table"), head=document.createElement("tr");
+  for(const label of ["Page","Accepted","Held","Excluded / rejected","Source-verified passages","Recorded warnings / diagnostics"]) {const th=document.createElement("th");th.textContent=label;head.append(th);}table.append(head);
+  for(const p of report.pages) {
+    const row=document.createElement("tr"), cell=document.createElement("td"), open=document.createElement("button");
+    open.type="button";open.textContent=String(p.page);open.onclick=()=>run(async()=>{el("reviewPage").value=p.page;el("reviewStatus").value="";offset=0;await loadInspection();});cell.append(open);row.append(cell);
+    for(const text of [p.approved,p.pending,`${p.excluded} / ${p.rejected}`,p.verified_chunks,
+      `${p.warning_codes.join(", ") || (p.has_attributed_evidence ? "None recorded" : "No attributed evidence — inspect source")} · ${p.diagnostic_regions} regions`]) {const td=document.createElement("td");td.textContent=String(text);row.append(td);}table.append(row);
+  }
+  const scroll=document.createElement("div");scroll.className="table-scroll";scroll.append(table);root.append(scroll);
+  if(report.document_warnings.length) {const warnings=document.createElement("pre");warnings.textContent=JSON.stringify(report.document_warnings,null,2);root.append(warnings);}
+  return "Coverage inventory loaded. Open a page number to inspect its evidence.";
+});
 el("connect").onclick = () => run(async () => { const health = await json("health"); dimension=health.dimension; show("health", health);
   if (!value("reviewer") && health.authorized_reviewers.length === 1) el("reviewer").value = health.authorized_reviewers[0];
   await loadVersions(); connected=true; el("connection").open=false; el("connectionState").textContent="Connected · "+value("tenant");

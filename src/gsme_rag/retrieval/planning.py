@@ -17,6 +17,41 @@ EXPANSIONS = {
 }
 
 
+def needs_conversation(question):
+    """Recognize referential follow-ups without treating every new topic as one."""
+    text = question.casefold().strip()
+    text = re.sub(r"^(?:please\s+)?(?:(?:can|could|would) you\s+)?", "", text)
+    if re.match(r"(?:tell me more|explain more|give (?:me )?(?:an? )?examples?)\s+(?:about|of)\s+"
+                r"(?!(?:it|them|this|that|these|those)\b)\w", text):
+        return False
+    return bool(re.search(r"^(?:please\s+)?(?:(?:how|why|when|where|what|which)\s+)?"
+                          r"(?:does|do|is|are|can|could|would|should|will)\s+"
+                          r"(?:it|its|they|them|their|those|these|this|that)\b", text) or
+                re.search(r"^(?:please\s+)?(?:compare|explain|describe|simplify|summari[sz]e)\s+"
+                          r"(?:it|them|this|that|these|those)\b", text) or
+                re.search(r"\b(?:this|that)\s+(?:work|mean|differ|compare|cost)", text) or
+                re.match(r"(?:what about|how about|and\b|also\b|why[?!]*$|how so|"
+                         r"explain (?:more|further)|tell me more|give (?:me )?(?:an? )?examples?\b|"
+                         r"summari[sz]e (?:that|this)|compare (?:the two|both))", text))
+
+
+def contextualize_question(question, previous):
+    """Carry bounded user questions as topic hints, never saved answer claims.
+
+    This deterministic expansion preserves the user's wording, negations and
+    identifiers. The normal answer model resolves references from fresh evidence.
+    """
+    if not needs_conversation(question) or not previous:
+        return None
+    if len(previous) > 3 or any(not isinstance(q, str) or not q.strip() or len(q) > 800 for q in previous):
+        return None
+    return {"original_question": question,
+            "search_question": question + "\n\nEarlier user questions (topic context only, not evidence):\n" +
+                               "\n".join(previous),
+            "history_count": len(previous), "method": "bounded_user_question_context",
+            "notice": "Using recent questions in this chat to understand your follow-up."}
+
+
 def interpret_comparison(question):
     """An explicit, narrow acronym interpretation; never an invisible correction.
 

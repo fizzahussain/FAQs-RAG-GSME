@@ -6,7 +6,8 @@ from fastapi.testclient import TestClient
 from gsme_rag.storage.admin import create_admin_app
 from pathlib import Path
 
-from gsme_rag.retrieval.planning import plan_query, fuse_query_hits, interpret_comparison
+from gsme_rag.retrieval.planning import (plan_query, fuse_query_hits, interpret_comparison,
+                                       needs_conversation, contextualize_question)
 from gsme_rag.retrieval import RetrievalOptions, retrieve
 from gsme_rag.retrieval.reranking import FakeReranker
 from gsme_rag.storage.providers import FakeEmbeddings
@@ -15,6 +16,23 @@ from test_retrieval import MemoryStore, source_row
 
 
 class QueryPlanningTests(TestCase):
+    def test_followups_preserve_current_question_and_only_bounded_user_context(self):
+        for question in ("How is it different from an IDM?", "What are its advantages?",
+                         "Compare them", "Tell me more", "Could you explain it more?", "What about their facilities?",
+                         "Does it not support LOT A17 at 20 nm on 2026-11-10?"):
+            with self.subTest(question=question):
+                result = contextualize_question(question, ["What is a fabless company?"])
+                self.assertIsNotNone(result)
+                self.assertTrue(result["search_question"].startswith(question))
+                self.assertIn("What is a fabless company?", result["search_question"])
+                self.assertEqual(result["history_count"], 1)
+        for question in ("What is PCM?", "How does PCM work and what are its outputs?",
+                         "Give an example of PCM", "Tell me more about PCM", "hi"):
+            self.assertFalse(needs_conversation(question))
+            self.assertIsNone(contextualize_question(question, ["What is a fabless company?"]))
+        for context in ([], ["x" * 801], ["What is PCM?"] * 4):
+            self.assertIsNone(contextualize_question("How does it work?", context))
+
     def test_only_explicit_fabless_idp_comparison_gets_a_disclosed_interpretation(self):
         result=interpret_comparison('Fabless vs IDP')
         self.assertEqual(result['search_question'],'Fabless vs IDM')

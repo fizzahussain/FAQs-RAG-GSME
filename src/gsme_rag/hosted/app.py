@@ -35,7 +35,7 @@ from gsme_rag.storage.pipeline import process_ingestion, process_index
 from gsme_rag.storage.postgres import EvidenceStore
 from gsme_rag.storage.providers import CohereEmbeddings, ProviderOperationError
 from gsme_rag.retrieval.reranking import CohereReranker
-from gsme_rag.retrieval.planning import interpret_comparison
+from gsme_rag.retrieval.planning import interpret_comparison, needs_conversation, contextualize_question
 from gsme_rag.storage.vectors import QdrantEvidence
 from gsme_rag.version import __version__
 from .access import AccessStore, Principal
@@ -98,7 +98,7 @@ class HostedSettings:
 
     @classmethod
     def from_env(cls):
-        return cls(origin=os.getenv("GSME_HOSTED_ORIGIN", cls.origin),
+        return cls(origin=os.getenv("GSME_HOSTED_ORIGIN") or os.getenv("RENDER_EXTERNAL_URL") or cls.origin,
             tenant=os.getenv("GSME_HOSTED_TENANT", cls.tenant),
             google_client_id=os.getenv("GSME_GOOGLE_CLIENT_ID", ""),
             workspace_domains=tuple(d.strip().casefold() for d in os.getenv("GSME_GOOGLE_WORKSPACE_DOMAINS", "").split(",") if d.strip()),
@@ -291,6 +291,14 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"})
         if hosted.origin.startswith("https:"):
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        if response.status_code == 200 and request.url.path in {"/operator/docs", "/operator/redoc"}:
+            # FastAPI's interactive docs use CDN assets and an inline bootstrap.
+            # This exception applies only after the separate operator gate succeeds.
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; "
+                "img-src 'self' data: https://fastapi.tiangolo.com; object-src 'none'; "
+                "base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         return response
 
     # Trace even boundary rejections; never accept a caller-provided trace ID.
@@ -364,6 +372,40 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
     @app.get("/")
     def home():
         return FileResponse(web / "index.html")
+
+    @app.get("/health/live", include_in_schema=False)
+    def live():
+        return {"status": "alive", "version": __version__}
+
+    @app.get("/health/ready", include_in_schema=False)
+    def ready():
+        # This probes dependencies only. It never embeds, reranks or calls an LLM.
+        checks = {"postgres": False, "qdrant": False, "files": False}
+        try:
+            required = {p.name for p in Path(__file__).parents[1].joinpath("storage", "migrations").glob("*.sql")}
+            with store.connect() as db:
+                installed = {row["name"] for row in db.execute("SELECT name FROM schema_migrations").fetchall()}
+            checks["postgres"] = bool(required) and required <= installed
+        except psycopg.Error:
+            pass
+        try:
+            vectors = QdrantEvidence(settings.qdrant_url, settings.collection, settings.dimension, timeout=3)
+            try:
+                vectors.client.get_collections()
+                checks["qdrant"] = True
+            finally:
+                vectors.client.close()
+        except Exception as error:
+            emit("hosted.readiness.qdrant", error_type=type(error).__name__)
+        try:
+            settings.data_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=settings.data_dir):
+                checks["files"] = True
+        except OSError:
+            pass
+        healthy = all(checks.values())
+        return JSONResponse({"status": "ready" if healthy else "not_ready", "checks": checks},
+                            status_code=200 if healthy else 503)
 
     @app.get("/api/config")
     def config():
@@ -580,8 +622,25 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
             raise HTTPException(503, "Search is busy; retry shortly", headers={"Retry-After": "3"})
         try:
             document = str(body.document_id) if body.document_id else None
+            query_context = None
+            if needs_conversation(body.question):
+                previous = history.recent_questions(body.chat_id, scoped, document) if body.chat_id else []
+                query_context = contextualize_question(body.question, previous)
+                if query_context is None:
+                    return {"route": "documents", "status": "clarification_needed", "document_id": document,
+                            "request_id": REQUEST_ID.get(), "results": [], "answer_sources": [],
+                            "rerank_input_count": 0, "timings_ms": {}, "query_context": None,
+                            "answer": {"status": "clarification_needed", "claims": [], "citations": [],
+                                       "text": "Which topic or item do you mean? Please include its name so I can search the documents accurately."}}
+                emit("hosted.query.contextualized", history_count=query_context["history_count"],
+                     query_chars=len(query_context["search_question"]))
+                if on_event:
+                    on_event({"type": "status", "stage": "interpreting", "notice": query_context["notice"]})
             interpretation = interpret_comparison(body.question)
             question = interpretation["search_question"] if interpretation else body.question
+            if query_context:
+                question = contextualize_question(question, previous)["search_question"]
+                query_context["search_question"] = question
             if interpretation:
                 emit("hosted.query.interpreted", failure_reason=interpretation["reason"])
                 if on_event:
@@ -636,6 +695,7 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                  model=answer.get("model") if answer else None,
                  fallback_used=answer.get("fallback_used") if answer else None)
             return {"route": "documents", "status": report["status"], "answer": answer,
+                    "document_id": document, "query_context": query_context,
                     "retrieval_strategy": report.get("strategy", "hybrid"),
                     "retrieval_fallback_used": report.get("fallback_used", False),
                     "reranker_model": report.get("reranker_model"),

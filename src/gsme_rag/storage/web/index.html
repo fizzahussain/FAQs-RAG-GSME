@@ -60,6 +60,7 @@
 <section id="panel-review" role="tabpanel" aria-labelledby="tab-review" hidden>
 <div class="section-heading"><div><h2>Review what needs attention</h2><p id="reviewSummary" class="muted">Open a document from the library first.</p></div><button id="inspect" class="secondary">Refresh review</button></div>
 <div id="reviewCounts" class="stat-grid"></div>
+<details class="card"><summary>Document coverage &amp; extraction gaps</summary><p class="muted">Inspect page evidence, held passages and recorded warnings. This is not a completeness certificate or an OCR execution log.</p><button id="coverage" class="secondary">Check document coverage</button><div id="coverageReport" aria-live="polite"></div></details>
 <p class="callout">Clean accepted text is already usable. Review only the held content you need. Excluded placeholders are not a review checklist.</p>
 <div class="review-toolbar"><div><label for="reviewStatus">Show passages</label><select id="reviewStatus"><option value="pending">Needs review</option><option value="">All passages</option><option value="approved">Accepted</option><option value="rejected">Rejected</option><option value="excluded">Excluded</option></select></div><div><label for="reviewPage">Source page</label><input id="reviewPage" type="number" min="1" step="1" placeholder="All pages"></div><button id="clearReviewFilters" class="secondary">Reset filters</button><button id="source" class="secondary">View original</button></div>
 <div class="review-layout"><div class="review-evidence">

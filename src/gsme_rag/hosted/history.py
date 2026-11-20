@@ -21,6 +21,7 @@ def safe_history_response(response, current):
     unsafe = bool(result.get("results") and not has_parts)
     if unsafe or any(not current(version, chunk) for version, chunk in references):
         result.update(results=[], answer_sources=[], schedule_search=None, status="historical_evidence_unavailable")
+        result["query_context"] = None
         result["answer"] = {"status": "historical_evidence_unavailable", "claims": [], "citations": [],
                             "text": "The sources for this saved reply have changed or are no longer available. Ask again to search current evidence."}
     return result
@@ -83,6 +84,31 @@ class ChatHistory:
             n = db.execute("SELECT count(*) AS n FROM hosted_chat_turns WHERE chat_id=%s", (chat_id,)).fetchone()["n"]
             if n >= 100:
                 raise HTTPException(409, "This chat has 100 turns. Start a new chat.")
+
+    def recent_questions(self, chat_id, scoped, document_id=None):
+        """Read at most three same-scope turns after checking current evidence."""
+        from gsme_rag.retrieval.planning import needs_conversation
+
+        with self.store.connect() as db:
+            self.owned(db, chat_id, scoped)
+            turns = db.execute("""SELECT question,response FROM hosted_chat_turns
+                WHERE chat_id=%s ORDER BY id DESC LIMIT 3""", (chat_id,)).fetchall()
+        questions = []
+        for turn in turns:
+            response, question = turn["response"], turn["question"]
+            # Scope switches and failed/withdrawn replies break the topic chain.
+            if (response.get("document_id") != document_id or
+                    (response.get("answer") or {}).get("status") != "answered" or
+                    not question.strip() or len(question) > 800):
+                return []
+            references, has_parts = source_keys(response)
+            if not has_parts or not references or not references <= scoped.approved_source_keys(references):
+                return []
+            questions.append(question)
+            if not needs_conversation(question):
+                return list(reversed(questions))
+        # Do not continue a chain whose original topic fell outside the bound.
+        return []
 
     def append(self, chat_id, scoped, question, response):
         with self.store.connect() as db:
