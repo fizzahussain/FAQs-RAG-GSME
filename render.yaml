@@ -23,5 +23,9 @@ services:
         sync: false
       - key: GSME_HOSTED_ADMIN_ENABLED
         value: "no"
+      - key: GSME_MUSE_SYNC_ENABLED
+        value: "yes"
+      - key: GSME_MUSE_MAX_AGE_SECONDS
+        value: "900"
       - key: GSME_REVIEW_AUTH_TOKEN
         generateValue: true

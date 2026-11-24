@@ -12,6 +12,8 @@ let chatNavigationEpoch = 0;
 let chatController = null;
 let searchMode = "chat";
 let previousScheduleFilters = null;
+let pendingMeeting = null;
+let meetingDraftKey = null, meetingDraftSignature = "";
 
 function resetScheduleSearch() {
   previousScheduleFilters = null;
@@ -109,6 +111,7 @@ function resetConversation() {
 }
 $("new-chat").onclick = () => {
   if (busy || uploadBusy) return;
+  pendingMeeting = null; $("meeting-proposal").hidden = true;
   setSearchMode("chat");
   resetConversation(); renderChats();
   $("notice").textContent = "New chat. Your documents are still available.";
@@ -325,7 +328,17 @@ function clearPrivateState() {
   $("scope").replaceChildren(new Option("All files", ""));
   $("document-links").replaceChildren();
   $("signout").hidden = true;
-  $("signin").hidden = config.guest_uploads_enabled || !config.private_uploads_enabled;
+  $("signin").hidden = !config.private_uploads_enabled;
+  pendingMeeting = null;
+  meetingDraftKey = null; meetingDraftSignature = "";
+  $("my-bookings").replaceChildren(); $("member-list").replaceChildren();
+  $("meeting-resource").replaceChildren(); $("meeting-form").reset();
+  $("role-form").reset(); $("resource-form").reset();
+  $("company-signin-form").reset(); $("company-signin-notice").textContent = "";
+  $("meeting-summary").textContent = ""; $("meetings-notice").textContent = "";
+  $("muse-source-status").textContent = "";
+  $("meeting-proposal").hidden = true; $("company-admin-tools").hidden = true;
+  $("meetings-dialog").close(); $("company-signin").close();
   $("googleButton").replaceChildren(); $("file").value = "";
   setSearchMode("chat");
 }
@@ -506,6 +519,23 @@ async function resumeAndWatch(version) {
 }
 
 function schedule(box, result) {
+  for (const source of result.freshness || []) {
+    const note = document.createElement("p"); note.className = "citation";
+    note.textContent = `${source.schedule_kind} website schedule checked ${new Date(source.checked_at).toLocaleString()}. `;
+    const link = document.createElement("a");
+    if (/^https:\/\/www\.musesemi\.com\/(?:full|shared)-block-tapeout-schedule$/.test(source.source_url)) {
+      link.href = source.source_url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Open current website"; note.append(link);
+    }
+    box.append(note);
+  }
+  for (const warning of result.warnings || []) {
+    if (!warning.includes("withheld")) continue;
+    const note = document.createElement("p"); note.className = "citation"; note.textContent = warning; box.append(note);
+  }
+  for (const note of result.assumptions || []) {
+    const assumption = document.createElement("p"); assumption.className = "citation";
+    assumption.textContent = note; box.append(assumption);
+  }
   if (result.status === "clarification_needed") { box.querySelector("p").textContent = result.message; return; }
   if (result.filters) {
     const f = result.filters, active = document.createElement("p"); active.className = "citation";
@@ -621,6 +651,20 @@ $("ask").onsubmit = async event => {
   event.preventDefault(); if (!initialized || busy || uploadBusy) return;
   const epoch = sessionEpoch, question = $("question").value.trim(); if (!question) return;
   $("question").value = ""; resizeComposer();
+  if (pendingMeeting && /^(?:yes(?:[, ]+let'?s do it)?|confirm(?: booking)?|book it)[.!]?$/i.test(question)) {
+    message("user", question); busy = true; controls();
+    try { await confirmPendingMeeting(); } catch (error) { showError(error); }
+    finally { busy = false; controls(); }
+    return;
+  }
+  if (/^(?:please\s+)?(?:book|schedule|arrange)\s+(?:a\s+)?(?:meeting|appointment|call)\b/i.test(question)) {
+    message("user", question);
+    message("assistant", "Choose a calendar and time in Meetings. Review the proposal before confirming your booking.");
+    $("open-meetings").click(); return;
+  }
+  // A confirmation must refer to the last visible proposal, not an unrelated
+  // question asked later in the conversation.
+  if (pendingMeeting) { pendingMeeting = null; $("meeting-proposal").hidden = true; }
   if (searchMode === "schedules") {
     busy = true; controls(); chatController = new AbortController();
     try { await runScheduleSearch(question, epoch); }
@@ -707,6 +751,7 @@ $("signout").onclick = () => {
 };
 $("signin").onclick = () => {
   if (!config.private_uploads_enabled) return;
+  if (config.auth_provider === "supabase") { $("company-signin").showModal(); return; }
   const initialize = () => google.accounts.id.initialize({client_id: config.google_client_id, callback: async response => {
     credential = response.credential; sessionEpoch++; clearPrivateState();
     try {
@@ -720,6 +765,147 @@ $("signin").onclick = () => {
     script.onload = () => { initialize(); google.accounts.id.renderButton($("googleButton"), {type: "standard", theme: "outline"}); };
     script.onerror = () => showError(new Error("Google sign-in could not load.")); document.head.append(script);
   }
+};
+
+// Booking UI calls dedicated APIs; generated answer text cannot execute actions.
+const companyJson = async (path, body, method = "POST") =>
+  (await api(path, {method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})).json();
+
+async function loadMeetings() {
+  const epoch = sessionEpoch;
+  const [me, resources, bookings] = await Promise.all([
+    api("access/me").then(r => r.json()), api("calendar/resources").then(r => r.json()), api("bookings").then(r => r.json())]);
+  if (epoch !== sessionEpoch) return;
+  $("meeting-resource").replaceChildren(...resources.resources.map(r => new Option(`${r.name} (${r.timezone})`, r.id)));
+  $("meeting-timezone").textContent = `Your timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`;
+  $("meetings-notice").textContent = resources.enabled ? "Check availability, then review and confirm your meeting." : "The operator still needs to connect Google Calendar.";
+  $("meeting-form").hidden = me.role === "viewer" || !resources.enabled || !resources.resources.length;
+  $("company-admin-tools").hidden = me.role !== "admin";
+  $("my-bookings").replaceChildren();
+  for (const b of bookings.bookings) {
+    const row = document.createElement("div"), text = document.createElement("p");
+    text.textContent = `${b.title} · ${new Date(b.starts_at).toLocaleString()} – ${new Date(b.ends_at).toLocaleString()} · ${b.state}`;
+    row.append(text);
+    if (me.role !== "viewer" && ["proposed", "creating"].includes(b.state)) {
+      const retry = document.createElement("button"); retry.type = "button";
+      retry.textContent = b.state === "creating" ? "Check / finish booking" : "Review proposal";
+      retry.onclick = () => showMeetingProposal(b); row.append(retry);
+    }
+    if (me.role !== "viewer" && !["cancelled", "expired", "conflict"].includes(b.state)) {
+      const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancel booking";
+      cancel.onclick = async () => {
+        if (!window.confirm(`Cancel “${b.title}”?`)) return;
+        cancel.disabled = true;
+        try { await companyJson(`bookings/${b.id}/cancel`, {confirmed: true}); await loadMeetings(); }
+        catch (error) { $("meetings-notice").textContent = error.message; cancel.disabled = false; }
+      }; row.append(cancel);
+    }
+    $("my-bookings").append(row);
+  }
+  if (!bookings.bookings.length) $("my-bookings").textContent = "No meetings booked yet.";
+  if (me.role === "admin") {
+    const members = await (await api("access/members")).json();
+    if (epoch !== sessionEpoch) return;
+    $("member-list").textContent = `Your subject: ${me.subject}. Explicit roles: ` + members.members.map(m => `${m.subject}: ${m.role}`).join("; ");
+    const source = await (await api("integrations/muse/schedules")).json();
+    if (epoch !== sessionEpoch) return;
+    $("muse-source-status").textContent = source.enabled ? source.sources.map(s =>
+      `${s.schedule_kind}: checked ${s.checked_at ? new Date(s.checked_at).toLocaleString() : "not yet"}; ${s.trusted_rows} valid rows, ${s.quarantined_rows} held${s.last_error ? "; refresh failed: "+s.last_error : ""}`).join(". ") || "Waiting for initial import." : "Automatic website schedules are disabled in server settings.";
+  }
+}
+
+function meetingBody() {
+  if (!$("meeting-form").reportValidity()) throw new Error("Complete the meeting details.");
+  return {resource_id: $("meeting-resource").value, title: $("meeting-title").value.trim(),
+    starts_at: new Date($("meeting-start").value).toISOString(), ends_at: new Date($("meeting-end").value).toISOString()};
+}
+
+function showMeetingProposal(b) {
+  pendingMeeting = b;
+  $("meeting-summary").textContent = `Confirm “${b.title}” from ${new Date(b.starts_at).toLocaleString()} to ${new Date(b.ends_at).toLocaleString()}? Availability will be checked again.`;
+  $("meeting-proposal").hidden = false;
+}
+
+async function confirmPendingMeeting() {
+  if (!pendingMeeting) return;
+  const epoch = sessionEpoch, booking = pendingMeeting;
+  $("confirm-meeting").disabled = true;
+  try {
+    const result = await companyJson(`bookings/${booking.id}/confirm`, {confirmed: true});
+    if (epoch !== sessionEpoch) return;
+    pendingMeeting = null; $("meeting-proposal").hidden = true;
+    const text = `Meeting confirmed: ${result.title}, ${new Date(result.starts_at).toLocaleString()} to ${new Date(result.ends_at).toLocaleString()}.`;
+    $("meetings-notice").textContent = text; message("assistant", text);
+    await loadMeetings();
+  } finally { $("confirm-meeting").disabled = false; }
+}
+
+$("open-meetings").onclick = async () => {
+  if (!config.private_uploads_enabled) { $("notice").textContent = "The operator needs to configure company sign-in before meetings are available."; return; }
+  if (!credential) { $("notice").textContent = "Sign in to book or view meetings."; $("signin").click(); return; }
+  $("meetings-dialog").showModal(); $("meetings-notice").textContent = "Loading your meetings…";
+  try { await loadMeetings(); } catch (error) { $("meetings-notice").textContent = error.message; }
+};
+$("close-meetings").onclick = () => $("meetings-dialog").close();
+$("refresh-muse-source").onclick = async () => {
+  const button = $("refresh-muse-source"); button.disabled = true;
+  $("muse-source-status").textContent = "Reading both public website tables and comparing every cell…";
+  try { await companyJson("integrations/muse/schedules/refresh", {confirmed:true}); await loadMeetings(); await library(); }
+  catch (error) { $("muse-source-status").textContent = error.message; }
+  finally { button.disabled = false; }
+};
+$("check-meeting").onclick = async () => {
+  try {
+    const b = meetingBody(); const result = await companyJson(`calendar/resources/${b.resource_id}/availability`, {starts_at:b.starts_at, ends_at:b.ends_at});
+    $("meetings-notice").textContent = result.available ? "Available now. Prepare a booking to continue." : "This calendar is busy. Choose another time.";
+  } catch (error) { $("meetings-notice").textContent = error.message; }
+};
+$("meeting-form").onsubmit = async event => {
+  event.preventDefault(); const epoch = sessionEpoch;
+  const button = event.submitter; button.disabled = true;
+  try {
+    const b = meetingBody(), signature = JSON.stringify(b);
+    if (!meetingDraftKey || signature !== meetingDraftSignature) {
+      meetingDraftKey = crypto.randomUUID(); meetingDraftSignature = signature;
+    }
+    b.idempotency_key = meetingDraftKey;
+    const proposal = await companyJson("bookings/proposals", b);
+    if (epoch !== sessionEpoch) return;
+    showMeetingProposal(proposal);
+    message("assistant", `Meeting proposal: ${proposal.title}, ${new Date(proposal.starts_at).toLocaleString()} to ${new Date(proposal.ends_at).toLocaleString()}. Use Confirm in Meetings, or reply “yes, let's do it” to confirm this proposal.`);
+  } catch (error) { $("meetings-notice").textContent = error.message; }
+  finally { button.disabled = false; }
+};
+$("confirm-meeting").onclick = () => confirmPendingMeeting().catch(error => { $("meetings-notice").textContent = error.message; });
+$("resource-form").onsubmit = async event => {
+  event.preventDefault();
+  try {
+    await companyJson("calendar/resources", {name:$("resource-name").value, calendar_id:$("resource-calendar").value, timezone:$("resource-timezone").value});
+    await loadMeetings();
+  } catch (error) { $("meetings-notice").textContent = error.message; }
+};
+$("role-form").onsubmit = async event => {
+  event.preventDefault();
+  try { await companyJson("access/members", {subject:$("role-subject").value.trim(), role:$("role-value").value}, "PUT"); await loadMeetings(); }
+  catch (error) { $("meetings-notice").textContent = error.message; }
+};
+$("close-company-signin").onclick = () => $("company-signin").close();
+$("send-company-code").onclick = async () => {
+  const button = $("send-company-code"); button.disabled = true;
+  try { const r = await companyJson("auth/code", {email:$("company-email").value.trim()}); $("company-signin-notice").textContent = r.message; }
+  catch (error) { $("company-signin-notice").textContent = error.message; }
+  finally { button.disabled = false; }
+};
+$("company-signin-form").onsubmit = async event => {
+  event.preventDefault(); const button = event.submitter; button.disabled = true;
+  try {
+    const result = await companyJson("auth/verify", {email:$("company-email").value.trim(), code:$("company-code").value.trim()});
+    credential = result.access_token; sessionEpoch++; clearPrivateState();
+    $("company-code").value = "";
+    await Promise.all([library(), loadChats()]); $("signout").hidden = false; $("signin").hidden = true;
+    $("notice").textContent = "Signed in. Your private documents and meetings are available.";
+  } catch (error) { $("company-signin-notice").textContent = error.message; }
+  finally { button.disabled = false; }
 };
 
 (async () => {

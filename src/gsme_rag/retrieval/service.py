@@ -186,7 +186,7 @@ def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, quest
     active_reranker = OllamaReranker() if local_mode else reranker
     try:
         with operation("retrieval.rerank", request_id=report["request_id"], candidates=len(candidates), model=active_reranker.model_version):
-            ranked = validate_ranking(active_reranker.rank(question, documents), len(candidates))
+            ranked = validate_ranking(active_reranker.rank(plan.variants[0], documents), len(candidates))
     except ProviderOperationError as error:
         if local_mode or not (options.local_outage_fallback and provider.external and record_outage(outage_key, error)):
             raise
@@ -195,7 +195,7 @@ def retrieve(store, vectors, provider, reranker, settings, tenant_id: str, quest
         bound_local_candidates()
         documents = [row["evidence_text"] for _, _, row in candidates]
         active_reranker = OllamaReranker()
-        ranked = validate_ranking(active_reranker.rank(question, documents), len(candidates))
+        ranked = validate_ranking(active_reranker.rank(plan.variants[0], documents), len(candidates))
     report["reranker_model"] = active_reranker.model_version
     report["rerank_input_count"] = len(candidates)
     timings["reranking"] = round((time.perf_counter() - phase) * 1000, 3)

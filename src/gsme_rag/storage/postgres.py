@@ -1014,6 +1014,9 @@ class EvidenceStore:
             WHERE r.tenant_id=%s AND d.tenant_id=%s AND d.current_version_id=r.version_id
               AND v.document_class='schedule' AND v.state IN ('approved','indexing','indexed')"""
         values = [tenant_id, tenant_id]
+        from gsme_rag.schedules.sync import enabled as muse_sync_enabled
+        if muse_sync_enabled():
+            scope += " AND EXISTS (SELECT 1 FROM muse_schedule_sources ms WHERE ms.tenant_id=r.tenant_id AND ms.document_id=r.document_id)"
         if allowed_documents is not None:
             scope += " AND r.document_id=ANY(%s::uuid[])"
             values.append(allowed_documents)

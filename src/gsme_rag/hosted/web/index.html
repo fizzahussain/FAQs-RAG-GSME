@@ -23,6 +23,7 @@
       <details><summary>Upload &amp; source help</summary><p>Use + beside your message, or Upload document. Processing starts automatically. Wait for “Ready to chat” beside the filename before searching it.</p><p>All files searches your available collection. Choose a filename in Search in only to narrow the search. Click a sidebar filename to open it.</p><p>“Waiting for provider” resumes automatically. “Source review needed” requires the operator to check uncertain extraction; uploading again will not verify it.</p></details>
       <details><summary>About your workspace</summary><p id="workspace-note">Follow-ups use recent questions in the same chat. Answers search current approved document evidence.</p><p>PDF, Word, Excel, PowerPoint, CSV and images · up to 20 MiB. Accepted text may be sent to configured AI services. Uncertain extraction stays held.</p></details>
       <button id="signin" class="secondary-button" hidden>Company sign-in</button><button id="signout" class="secondary-button" hidden>Sign out</button><div id="googleButton"></div>
+      <button id="open-meetings" class="secondary-button" type="button">Meetings &amp; bookings</button>
       <span class="workspace-label"><span aria-hidden="true">●</span> Document workspace</span>
     </div>
   </dialog>
@@ -64,5 +65,27 @@
   </main>
   <form id="upload" hidden><input id="file" type="file" accept=".pdf,.docx,.pptx,.xlsx,.csv,.png,.jpg,.jpeg,.tif,.tiff,.bmp" aria-label="Choose document" required><button id="upload-submit" disabled>Upload document</button></form>
   <dialog id="document-viewer" aria-labelledby="viewer-title"><div class="viewer-heading"><strong id="viewer-title">Document</strong><button id="viewer-close" class="secondary-button" type="button" aria-label="Close document preview">Close</button></div><p id="viewer-note" class="citation"></p><iframe id="viewer-pdf" title="Original PDF" hidden></iframe><img id="viewer-image" alt="Original document image" hidden><pre id="viewer-text" hidden></pre></dialog>
+<!-- Meeting writes always require a visible proposal and explicit confirmation. -->
+<dialog id="meetings-dialog" aria-labelledby="meetings-title">
+  <div class="viewer-heading"><h2 id="meetings-title">Meetings</h2><button id="close-meetings" type="button">Close</button></div>
+  <p>Book a meeting with the team. A meeting does not reserve tapeout capacity.</p>
+  <p id="meetings-notice" role="status"></p>
+  <form id="meeting-form">
+    <label>Calendar<select id="meeting-resource" required></select></label>
+    <label>Meeting title<input id="meeting-title" maxlength="160" required placeholder="Tapeout planning discussion"></label>
+    <label>Start (your local timezone)<input id="meeting-start" type="datetime-local" required></label>
+    <label>End (your local timezone)<input id="meeting-end" type="datetime-local" required></label>
+    <p id="meeting-timezone"></p><button type="button" id="check-meeting">Check availability</button>
+    <button type="submit">Prepare booking</button>
+  </form>
+  <div id="meeting-proposal" hidden><p id="meeting-summary"></p><button id="confirm-meeting" type="button">Yes, confirm this booking</button></div>
+  <h3>My bookings</h3><div id="my-bookings"></div>
+  <details id="company-admin-tools" hidden><summary>Company administration</summary>
+    <h3>Muse website schedules</h3><p id="muse-source-status">Loading source status…</p><button id="refresh-muse-source" type="button">Refresh public schedules now</button>
+    <form id="resource-form"><h3>Add booking calendar</h3><label>Name<input id="resource-name" required maxlength="120"></label><label>Google Calendar ID<input id="resource-calendar" required></label><label>Timezone<input id="resource-timezone" value="Asia/Karachi" required></label><button type="submit">Save calendar</button></form>
+    <form id="role-form"><h3>Member access</h3><label>Verified subject ID<input id="role-subject" required placeholder="supabase:... or google:..."></label><label>Role<select id="role-value"><option>viewer</option><option>member</option><option>admin</option><option>disabled</option></select></label><button type="submit">Update role</button></form><div id="member-list"></div>
+  </details>
+</dialog>
+<dialog id="company-signin" aria-labelledby="company-signin-title"><h2 id="company-signin-title">Company sign-in</h2><p>Use your invited email address. Ask the operator for an invitation if needed.</p><form id="company-signin-form"><label>Email<input id="company-email" type="email" required autocomplete="email"></label><button id="send-company-code" type="button">Send sign-in code</button><label>Code from your email<input id="company-code" inputmode="numeric" pattern="[0-9]{6,10}" required autocomplete="one-time-code"></label><button type="submit">Sign in</button><button id="close-company-signin" type="button">Close</button><p id="company-signin-notice" role="status"></p></form></dialog>
 </body>
 </html>

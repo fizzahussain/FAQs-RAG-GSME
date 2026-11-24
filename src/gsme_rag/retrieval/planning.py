@@ -6,6 +6,7 @@ rerank against it; multi-query is opt-in and bounded to three embeddings.
 
 from dataclasses import dataclass
 import re
+from .spelling import correct_query
 from types import SimpleNamespace
 
 
@@ -83,6 +84,7 @@ def plan_query(question, mode="original"):
         raise ValueError("A bounded nonblank question is required")
     # Schedule routing recognizes an explicit schedule request, not incidental
     # words inside a technical definition or an arbitrary date-like identifier.
+    question, _ = correct_query(question)
     lower = question.casefold()
     schedule = bool(re.search(r"\b(?:schedules?|tapeout dates?|next(?:\s+\w+){0,3}\s+tapeout)\b", lower))
     if re.search(r"\btapeout\b", lower) and re.search(r"\b(?:trial|final|deadline|ship|shipping|upcoming)\b", lower):

@@ -30,6 +30,6 @@ LANGUAGE sql IMMUTABLE AS $$
                           || chr(1048576) || '-' || chr(1114109) || ']')
          AND regexp_replace(body, 'https?://[^[:space:]<>]+', '', 'g')
              !~* ('[' || chr(61) || chr(8721) || chr(8719) || chr(8730) || chr(65533)
-                  || ']|\(cid:[0-9]+\)|Image text \(OCR\)|Visual evidence on page|```|~~~');
+                  || ']|\(cid:[0-9]+\)|Image text \(OCR\)|Visual evidence on page|```|~~~'));
 $$;
 

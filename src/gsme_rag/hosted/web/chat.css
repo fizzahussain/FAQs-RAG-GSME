@@ -60,3 +60,10 @@ body.sidebar-collapsed{grid-template-columns:minmax(0,1fr)}
 .schedule-filter-fields input,.schedule-filter-fields select{border:1px solid var(--line);border-radius:6px;padding:5px;background:#fff;width:100%}
 @media(max-width:680px){.header-title div>span{display:none}.header-title strong{font-size:.8rem}.workspace-switch{gap:0;padding:3px}.workspace-switch button{padding:6px 8px;font-size:.7rem}.chat-header{gap:5px}.header-title{gap:3px}.schedule-filter-fields{grid-template-columns:1fr 1fr}.schedule-filter-fields label:first-child{grid-column:1/-1}#schedule-workspace{margin-top:12px}}
 @media(max-width:680px){body.sidebar-collapsed{display:block}.brand-mark{width:58px}.welcome-mark{width:96px;font-size:30px}}
+#meetings-dialog,#company-signin{width:min(620px,92vw);max-height:85vh;overflow:auto;border:1px solid var(--line);border-radius:16px;padding:24px;color:inherit;background:#fff}
+#meetings-dialog::backdrop,#company-signin::backdrop{background:#143b3566}
+#meetings-dialog label,#company-signin label{display:flex;flex-direction:column;gap:5px;margin:12px 0;font-size:.85rem}
+#meetings-dialog input,#meetings-dialog select,#company-signin input{border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit}
+#meetings-dialog button,#company-signin button{padding:8px 12px;border-radius:7px;border:1px solid var(--line);margin:4px;background:var(--soft);cursor:pointer}
+#meeting-proposal{padding:12px;border:1px solid var(--accent);border-radius:10px;margin:14px 0}
+#my-bookings>div{border-top:1px solid var(--line);padding:12px 0;font-size:.85rem}

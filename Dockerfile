@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir ".[storage,hosted]"
+RUN pip install --no-cache-dir ".[storage,hosted,websync]" \
+    && playwright install --with-deps chromium
 
 EXPOSE 10000
 CMD ["python", "-m", "gsme_rag.hosted.deploy"]

@@ -32,6 +32,41 @@ class SchedulePlanningTests(TestCase):
         self.assertEqual((p.schedule_kind, p.technology_nm, p.flavor), ("shared", 28, "HPC+ RF"))
         self.assertEqual((p.date_from, p.date_to), (date(2026, 11, 1), date(2026, 12, 31)))
 
+    def test_obvious_schedule_kind_typos_are_corrected_with_explicit_assumption(self):
+        for question, expected in (("Show ful schedules", "full"),
+                                   ("Show feuel schedules", "full"),
+                                   ("Show feuel 180nm schedules", "full"),
+                                   ("Show F-U-L schedules", "full"),
+                                   ("Show F-U-L-L schedules", "full"),
+                                   ("Show shraed schedules", "shared"),
+                                   ("Show btoh schedules", "both")):
+            planned, _, errors = self.plan(question)
+            self.assertEqual(errors, [], question)
+            self.assertEqual(planned.schedule_kind, expected, question)
+
+        # Preserve typo-like text in a flavor field; it is an exact identifier.
+        planned, _, errors = self.plan('Show shared schedules flavor "feuel"')
+        self.assertEqual(errors, [])
+        self.assertEqual(planned.flavor, "feuel")
+        for question in ('Show shared schedules flavor feuel', 'Show shared schedules flavor "shraed"'):
+            planned, _, errors = self.plan(question)
+            self.assertEqual(errors, [], question)
+            self.assertEqual(planned.schedule_kind, "shared")
+        for question in ("Show fuel schedules", "Show fill schedules", "Show full schedules not 180nm"):
+            self.assertTrue(self.plan(question)[2], question)
+        previous = ScheduleFilters(schedule_kind="shared", technology_nm=180)
+        planned, _, errors = self.plan("What about feuel?", previous_filters=previous)
+        self.assertEqual(errors, [])
+        self.assertEqual((planned.schedule_kind, planned.technology_nm), ("full", 180))
+
+    def test_schedule_search_reports_assumed_correction_to_user(self):
+        store = Mock()
+        store.schedule_search.return_value = {"rows": [], "total": 0, "sources": ["v"]}
+        result = search_schedules(store, "t", ScheduleQuery(question="Show feuel schedules"))
+        self.assertEqual(result["assumptions"], ['Assuming “feuel” meant “Full”.'])
+        self.assertEqual(result["filters"]["schedule_kind"], "full")
+        self.assertEqual(result["status"], "no_matching_rows")
+
     def context(self, question, previous=None, **kwargs):
         planned, _, errors = self.plan(question, previous_filters=previous, **kwargs)
         self.assertEqual(errors, [], question)

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, skipUnless
+from unittest.mock import Mock
 
 from docx import Document
 import pymupdf as fitz
@@ -14,6 +15,22 @@ from tools.evaluate_gsme_sources import inspect_cases, load_audit
 
 
 class SourceCaseTests(TestCase):
+    def test_evaluation_scope_keeps_approved_comparison_context_without_widening_sources(self):
+        from tools.evaluate_answer_increment import AuthorizedStore
+        store = Mock()
+        allowed = dict(source_file="manual.pdf", source_sha256="known-hash", version_id="version-one")
+        unapproved = {**allowed, "source_sha256":"changed"}
+        other = {**allowed, "source_file":"private.pdf"}
+        store.comparison_context.return_value = [allowed, unapproved, other]
+        store.retrieval_parts.return_value = ["point-one"]
+        store.is_source_current_approved.return_value = True
+        scoped = AuthorizedStore(store, {"manual.pdf":{"source_sha256":"known-hash", "version_id":"version-one"}})
+        self.assertEqual(scoped.comparison_context("tenant", "version-one", "chunk"), [allowed])
+        self.assertEqual(scoped.retrieval_parts("tenant", "version-one", "unit", "model", "collection"), ["point-one"])
+        self.assertEqual(scoped.retrieval_parts("tenant", "different-version", "unit", "model", "collection"), [])
+        self.assertTrue(scoped.is_source_current_approved("tenant", "version-one", "chunk"))
+        self.assertFalse(scoped.is_source_current_approved("tenant", "different-version", "chunk"))
+
     def test_frames_underlines_and_bullets_are_not_substantive_diagrams(self):
         with fitz.open() as document:
             page = document.new_page(width=600, height=800)

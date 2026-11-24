@@ -6,6 +6,7 @@ session, never a browser-selected owner or tenant. Source acceptance is independ
 
 from dataclasses import dataclass
 from uuid import UUID
+from gsme_rag.schedules.sync import enabled as muse_sync_enabled
 
 
 @dataclass(frozen=True)
@@ -14,7 +15,7 @@ class Principal:
 
     @property
     def company_signed_in(self):
-        return bool(self.subject and self.subject.startswith("google:"))
+        return bool(self.subject and self.subject.startswith(("google:", "supabase:")))
 
 
 class AccessStore:
@@ -30,6 +31,8 @@ class AccessStore:
 
     def _clause(self, download=False):
         shared = "a.visibility='company_faq'" if download else "a.visibility IN ('company_faq','company_schedule')"
+        if download and muse_sync_enabled():
+            shared = "(" + shared + " OR (a.visibility='company_schedule' AND EXISTS (SELECT 1 FROM muse_schedule_sources ms WHERE ms.document_id=d.id AND ms.tenant_id=d.tenant_id)))"
         return (""" AND (a.owner_subject=%s OR
             (""" + shared + """ AND a.public_version_id=v.id
              AND d.current_version_id=v.id AND %s))""",
@@ -161,6 +164,7 @@ class AccessStore:
 
     def visible_documents(self):
         clause, params = self._clause()
+        website = " OR EXISTS (SELECT 1 FROM muse_schedule_sources ms WHERE ms.document_id=d.id AND ms.tenant_id=d.tenant_id)" if muse_sync_enabled() else ""
         with self.store.connect() as db:
             rows = db.execute("""SELECT v.id AS version_id,v.document_id,v.source_file,v.state,v.document_class,
                 (SELECT count(*) FROM evidence_chunks c WHERE c.version_id=v.id AND c.evidence_status='approved') AS accepted,
@@ -175,7 +179,7 @@ class AccessStore:
                 JOIN ingestion_jobs i ON i.version_id=v.id
                 WHERE d.tenant_id=%s AND a.tenant_id=%s AND
                 (d.current_version_id=v.id OR (a.owner_subject=%s AND v.state NOT IN ('superseded')))
-                """ + clause + " AND (a.visibility<>'company_schedule' OR a.owner_subject=%s) ORDER BY v.created_at DESC LIMIT 101",
+                """ + clause + " AND (a.visibility<>'company_schedule' OR a.owner_subject=%s" + website + ") ORDER BY v.created_at DESC LIMIT 101",
                 [self.principal.subject, self.tenant, self.tenant, self.principal.subject] + params + [self.principal.subject]).fetchall()
         # A reprocessed version is the same document, not another sidebar file.
         # Owners see its latest attempt; shared readers still see only the exact

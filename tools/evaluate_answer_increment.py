@@ -50,12 +50,26 @@ class AuthorizedStore:
 
     def allowed_hits(self, *args):
         return {point: row for point, row in self.store.allowed_hits(*args).items()
-            if row["source_file"] in self.sources
-            and row["source_sha256"] == self.sources[row["source_file"]]["source_sha256"]
-            and str(row["version_id"]) == self.sources[row["source_file"]]["version_id"]}
+            if self._allowed(row)}
 
-    def retrieval_parts(self, *args):
-        return self.store.retrieval_parts(*args)
+    def _allowed(self, row):
+        source = self.sources.get(row["source_file"])
+        return bool(source and row["source_sha256"] == source["source_sha256"]
+                    and str(row["version_id"]) == source["version_id"])
+
+    def retrieval_parts(self, tenant, version, *args):
+        if str(version) not in {s["version_id"] for s in self.sources.values()}:
+            return []
+        # This API returns point IDs; allowed_hits rechecks their source hashes.
+        return self.store.retrieval_parts(tenant, version, *args)
+
+    def comparison_context(self, *args):
+        # Match the hosted path without widening the approved evaluation corpus.
+        return [row for row in self.store.comparison_context(*args) if self._allowed(row)]
+
+    def is_source_current_approved(self, tenant, version, chunk):
+        return (str(version) in {s["version_id"] for s in self.sources.values()}
+                and self.store.is_source_current_approved(tenant, version, chunk))
 
 
 def main():

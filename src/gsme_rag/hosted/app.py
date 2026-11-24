@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 import psycopg
@@ -36,6 +37,8 @@ from gsme_rag.storage.postgres import EvidenceStore
 from gsme_rag.storage.providers import CohereEmbeddings, ProviderOperationError
 from gsme_rag.retrieval.reranking import CohereReranker
 from gsme_rag.retrieval.planning import interpret_comparison, needs_conversation, contextualize_question
+from gsme_rag.retrieval.planning import plan_query
+from gsme_rag.retrieval.spelling import correct_query
 from gsme_rag.storage.vectors import QdrantEvidence
 from gsme_rag.version import __version__
 from .access import AccessStore, Principal
@@ -43,6 +46,12 @@ from .identity import google_principal, IdentityUnavailable, InvalidIdentity
 from .sessions import browser_principal, create_browser_session, SESSION_SECONDS
 from .history import ChatHistory, source_keys
 from .streaming import answer_stream
+from .supabase import SupabaseAuth
+from .calendar_provider import GoogleCalendar, CalendarUnavailable
+from .company_api import company_router
+from .roles import CompanyRoles
+from gsme_rag.schedules.muse import ScheduleSourceUnavailable
+from gsme_rag.schedules.sync import MuseScheduleSync, enabled as muse_sync_enabled
 
 
 UPLOAD_ERROR_MESSAGES = {
@@ -164,14 +173,19 @@ def cited_source_groups(answer, results):
     return list(groups.values())
 
 
-def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, providers=None, auto_worker=None):
+def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, providers=None, auto_worker=None,
+                      calendar_provider=None, supabase_auth=None):
     answer_cache = AnswerCache()
     settings, hosted = settings or from_env(), hosted or HostedSettings.from_env()
     if store is None and providers is None:
         configure_console_logging(settings.data_dir)
     store = store or EvidenceStore(settings.database_url)
     history = ChatHistory(store, hosted.tenant)
-    verifier = verifier or (lambda token: google_principal(token, hosted.google_client_id, hosted.workspace_domains))
+    auth = supabase_auth or SupabaseAuth()
+    calendar_provider = calendar_provider or GoogleCalendar()
+    company_roles = CompanyRoles(store, hosted.tenant)
+    verifier = verifier or (auth.principal if auth.enabled else
+                           lambda token: google_principal(token, hosted.google_client_id, hosted.workspace_domains))
 
     @contextmanager
     def backend(need_reranker=True):
@@ -228,12 +242,26 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
         thread = Thread(target=poll, name="gsme-upload-scheduler", daemon=True) if worker_enabled and schema_ready else None
         if thread:
             thread.start()
+        def sync_public_schedules():
+            synchronizer = MuseScheduleSync(store, hosted.tenant, settings.data_dir)
+            while not worker_stop.is_set():
+                try:
+                    synchronizer.run_due()
+                except Exception as error:
+                    emit("schedule.sync.background_failed", error_type=type(error).__name__)
+                if worker_stop.wait(60):
+                    break
+        muse_thread = Thread(target=sync_public_schedules,name="muse-schedule-sync",daemon=True) if muse_sync_enabled() and schema_ready else None
+        if muse_thread:
+            muse_thread.start()
         try:
             yield
         finally:
             worker_stop.set()
             if thread:
                 await asyncio.to_thread(thread.join, 5)
+            if muse_thread:
+                await asyncio.to_thread(muse_thread.join, 5)
             await asyncio.to_thread(worker_pool.shutdown, wait=True, cancel_futures=False)
 
     app = FastAPI(title="GSME Muse", version=__version__, docs_url=None, redoc_url=None, openapi_url=None,
@@ -360,6 +388,8 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
             principal = verifier(value[7:])
             if not isinstance(principal, Principal) or not principal.subject:
                 raise InvalidIdentity("Invalid sign-in credential")
+            if principal.company_signed_in and company_roles.role(principal) == "disabled":
+                raise HTTPException(403, "Company account disabled")
             return principal
         except IdentityUnavailable:
             raise HTTPException(503, "Company sign-in is not configured") from None
@@ -368,6 +398,17 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
 
     def access(principal=Depends(identity)):
         return AccessStore(store, hosted.tenant, principal, hosted.public_faq_guests)
+
+    @app.exception_handler(ScheduleSourceUnavailable)
+    async def schedule_source_unavailable(request,error):
+        return JSONResponse({"detail":str(error)},status_code=503,headers={"Retry-After":"60"})
+
+    @app.exception_handler(CalendarUnavailable)
+    async def calendar_unavailable(request, error):
+        emit("calendar.unavailable", level=40, error_type=type(error).__name__)
+        return JSONResponse({"detail": str(error)}, status_code=503)
+
+    app.include_router(company_router(store, hosted.tenant, identity, calendar_provider, auth, rate))
 
     @app.get("/")
     def home():
@@ -410,9 +451,12 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
     @app.get("/api/config")
     def config():
         return {"version": __version__, "google_client_id": hosted.google_client_id,
-                "private_uploads_enabled": bool(hosted.google_client_id and hosted.workspace_domains),
+                "private_uploads_enabled": auth.enabled or bool(hosted.google_client_id and hosted.workspace_domains),
+                "auth_provider": "supabase" if auth.enabled else "google",
+                "calendar_enabled": calendar_provider.enabled,
+                "muse_schedule_sync": muse_sync_enabled(),
                 "guest_uploads_enabled": hosted.guest_uploads,
-                "uploads_enabled": hosted.guest_uploads or bool(hosted.google_client_id and hosted.workspace_domains),
+                "uploads_enabled": hosted.guest_uploads or auth.enabled or bool(hosted.google_client_id and hosted.workspace_domains),
                 "document_actions": ["retry", "delete_own_upload"],
                 "public_faqs": hosted.public_faq_guests}
 
@@ -480,6 +524,8 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
 
     @app.delete("/api/documents/{version_id}")
     def remove_document(version_id: UUID, scoped=Depends(access)):
+        if scoped.principal.company_signed_in:
+            company_roles.require(scoped.principal, "member", "admin")
         if not scoped.remove_owned_document(str(version_id)):
             raise HTTPException(404, "Your private upload is unavailable; shared library files cannot be deleted here")
         emit("hosted.upload.removed", version_id=str(version_id))
@@ -562,6 +608,8 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
 
         def public_error(error):
             emit("hosted.stream.failed", error_type=type(error).__name__)
+            if isinstance(error, ScheduleSourceUnavailable):
+                return {"detail":str(error),"code":"schedule_source_unavailable","retry_after_seconds":60}
             if isinstance(error, ProviderOperationError):
                 if error.error_code in LOCAL_SEARCH_ERRORS:
                     return {"detail":LOCAL_SEARCH_ERRORS[error.error_code], "code":error.error_code}
@@ -636,8 +684,13 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                      query_chars=len(query_context["search_question"]))
                 if on_event:
                     on_event({"type": "status", "stage": "interpreting", "notice": query_context["notice"]})
-            interpretation = interpret_comparison(body.question)
-            question = interpretation["search_question"] if interpretation else body.question
+            corrected, corrections = correct_query(body.question)
+            interpretation = interpret_comparison(corrected)
+            question = interpretation["search_question"] if interpretation else corrected
+            if corrections:
+                notice = " ".join(f'Assuming “{c["from"]}” meant “{c["to"]}”.' for c in corrections)
+                interpretation = {"original_question":body.question,"search_question":question,
+                    "reason":"query_spelling_assistance","notice":notice+(" "+interpretation["notice"] if interpretation else "")}
             if query_context:
                 question = contextualize_question(question, previous)["search_question"]
                 query_context["search_question"] = question
@@ -647,9 +700,11 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                     on_event({"type":"status", "stage":"interpreting", "notice":interpretation["notice"]})
             emit("hosted.chat.started", question_hash=sha256(body.question.encode()).hexdigest(),
                  query_chars=len(body.question), document_id=document)
-            # Chat always searches documents. Exact schedule lookup is an
-            # explicit API operation, never a guess based on words like GDS.
+            # Explicit schedule-record requests use exact typed lookup when
+            # live authority is enabled. Policy questions still search FAQs.
             greeting = " ".join(body.question.casefold().strip(" !?.").split())
+            if muse_sync_enabled() and plan_query(question).route == "schedules":
+                return jsonable_encoder(search_schedules(scoped,hosted.tenant,ScheduleQuery(question=body.question)))
             if greeting in {"hi", "hello", "hey", "how are you", "hi how are you"}:
                 return {"route": "documents", "status": "greeting", "answer": {
                     "status": "greeting", "text": "Hi! I'm ready to help. Ask about the FAQs or your documents. All files searches the available collection.",
@@ -856,6 +911,8 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
                schedule_kind: str | None = Form(default=None), document_id: UUID | None = Form(default=None), scoped=Depends(access)):
         if not scoped.principal.subject:
             raise HTTPException(401, "Open the chatbot to create a browser upload workspace")
+        if scoped.principal.company_signed_in:
+            company_roles.require(scoped.principal, "member", "admin")
         if document_id and not scoped.owned_document(str(document_id)):
             raise HTTPException(404, "Private document unavailable")
         rate("upload:" + scoped.principal.subject, 3)
@@ -901,6 +958,8 @@ def create_hosted_app(settings=None, hosted=None, store=None, verifier=None, pro
 
     @app.post("/api/documents/{version_id}/resume")
     def resume(version_id: UUID, background: BackgroundTasks, scoped=Depends(access)):
+        if scoped.principal.company_signed_in:
+            company_roles.require(scoped.principal, "member", "admin")
         inspection = scoped.inspect_version(hosted.tenant, str(version_id))
         if not inspection or not scoped.owned_document(str(inspection["version"]["document_id"])):
             raise HTTPException(404, "Private document unavailable")
